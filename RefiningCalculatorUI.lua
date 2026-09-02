@@ -14,15 +14,17 @@ local RC = RefiningCalculator
 local UI = {}
 RC.UI = UI
 
-UI.mode = "detail"    -- "detail" | "ranking"
-UI.sortKey = "net"    -- see RC.RANK_SORTS
-UI.page = 1           -- ranking page, 1-based
+UI.mode = "detail"       -- "detail" | "ranking" | "stats"
+UI.sortKey = "net"       -- see RC.RANK_SORTS
+UI.page = 1              -- ranking page, 1-based
+UI.statsTab = "overview" -- "overview", or a craft key
 
 local WM = WINDOW_MANAGER
 
 local WIN_NAME = "RefiningCalculatorWindow"
 local WIDTH, PAD, ROW_H = 500, 12, 20
-local HEADER_H = 58  -- two rows: dropdowns, then buttons
+local HEADER_H = 58       -- two rows: dropdowns, then buttons
+local TAB_ROW_H = 30      -- the statistics view adds a third row of tabs
 
 -- Ranking lists every material; showing all 45 would make the window taller
 -- than many screens, and the point of the view is the top of the list.
@@ -262,6 +264,25 @@ function UI:Create()
         RC.ClearPriceCache()
         UI:Refresh()
     end)
+
+    -- Statistics tabs: an overview plus one per craft. Created once; which are
+    -- shown, and where, is decided per render in UpdateStatsTabs.
+    self.tabs = {}
+    local function AddTab(key, label)
+        -- Distinct creation x keeps the control names unique; the real position
+        -- is set per render, since hidden tabs must not leave gaps.
+        local button = self:MakeButton(self.header, #self.tabs * 90, 90, 26, function()
+            UI.statsTab = key
+            UI:Refresh()
+        end, 60)
+        if button then
+            self.tabs[#self.tabs + 1] = { key = key, label = label, button = button }
+        end
+    end
+    AddTab("overview", "Overview")
+    for _, craft in ipairs(RC.CRAFTS) do
+        AddTab(craft.key, craft.label)
+    end
 
     self.tableArea = WM:CreateControl(nil, win, CT_CONTROL)
     self.tableArea:SetDimensions(WIDTH - PAD * 2, ROW_H)
@@ -704,6 +725,47 @@ function UI:RenderStatsCraft(s, i, entry)
     return i
 end
 
+-- A craft only gets a tab once something of that type has been refined, so the
+-- row shows what you have actually done rather than every craft in the game.
+-- Positions are assigned here because hidden tabs must not leave gaps.
+function UI:UpdateStatsTabs(s)
+    if not self.tabs then return end
+
+    local hasData = {}
+    for _, entry in ipairs(s.byCraft) do
+        hasData[entry.craft.key] = entry.total.refines > 0
+    end
+
+    local visible = {}
+    for _, tab in ipairs(self.tabs) do
+        if tab.key == "overview" or hasData[tab.key] then
+            visible[#visible + 1] = tab
+        else
+            tab.button:SetHidden(true)
+        end
+    end
+
+    -- Selection can point at a craft that no longer has samples, after a reset.
+    local stillValid = false
+    for _, tab in ipairs(visible) do
+        if tab.key == self.statsTab then stillValid = true break end
+    end
+    if not stillValid then self.statsTab = "overview" end
+
+    local gap, count = 4, #visible
+    local width = math.floor(((WIDTH - PAD * 2) - gap * (count - 1)) / count)
+    for index, tab in ipairs(visible) do
+        tab.button:SetHidden(false)
+        tab.button:SetDimensions(width, 26)
+        tab.button:ClearAnchors()
+        tab.button:SetAnchor(TOPLEFT, self.header, TOPLEFT, (index - 1) * (width + gap), 60)
+        tab.button:SetText(tab.label)
+        -- The active tab is the one you cannot click, which marks it without
+        -- needing a toggle state ZO_DefaultButton does not have.
+        tab.button:SetEnabled(tab.key ~= self.statsTab)
+    end
+end
+
 function UI:RenderStats()
     self:Create()
     self:PopulateDropdowns()
@@ -712,13 +774,14 @@ function UI:RenderStats()
     local s = RC.Stats.Summary(md.active)
     local other = RC.Stats.CountFor(not md.active)
 
-    -- Page 1 is the money summary; one page per craft follows.
-    local pages = 1 + #s.byCraft
-    if self.page > pages then self.page = pages end
-    if self.page < 1 then self.page = 1 end
-    self.pages = pages
+    self:UpdateStatsTabs(s)
 
-    local entry = s.byCraft[self.page - 1]
+    local entry
+    for _, e in ipairs(s.byCraft) do
+        if e.craft.key == self.statsTab then entry = e break end
+    end
+
+    self.pages = 1  -- tabs replace paging here
     self.title:SetText(entry and ("Refining statistics -- " .. entry.craft.label)
         or "Refining statistics")
 
@@ -776,8 +839,8 @@ function UI:RenderStats()
 
     self:UpdatePaging()
     self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
-    self.footer:SetHeight(30)
-    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74 + 30)
+    self.footer:SetHeight(0)
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + TAB_ROW_H + 6 + tableHeight + 74)
 end
 
 --------------------------------------------------------------------------------
@@ -794,6 +857,16 @@ end
 
 -- Button captions track state, so they say what clicking will do.
 function UI:UpdateButtons()
+    -- The tab row exists only in the statistics view; the header grows to make
+    -- room for it, and everything below reflows because it anchors to the header.
+    local statsMode = (self.mode == "stats")
+    if self.header then
+        self.header:SetHeight(statsMode and (HEADER_H + TAB_ROW_H) or HEADER_H)
+    end
+    if self.tabs and not statsMode then
+        for _, tab in ipairs(self.tabs) do tab.button:SetHidden(true) end
+    end
+
     if self.modeButton then
         -- The caption names the view the click will take you to.
         local next = { detail = "Find best", ranking = "Statistics", stats = "Detail" }

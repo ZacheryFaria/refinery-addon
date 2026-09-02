@@ -1,7 +1,7 @@
 ## Title: Refining Profit Calculator
 ## APIVersion: 101050
-## Version: 1.12.0
-## AddOnVersion: 1120
+## Version: 1.13.0
+## AddOnVersion: 1130
 ## Author: AI Assistant
 ## Description: Compares selling raw crafting materials against refining them, across all tiers of Blacksmithing, Clothing, Woodworking and Jewelry. Prices via LibPrice (Master Merchant, ATT, TTC or blended). Records real refining results so the model can be checked against them.
 ## DependsOn: LibCustomMenu
