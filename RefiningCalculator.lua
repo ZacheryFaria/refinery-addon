@@ -58,7 +58,7 @@ RC.applyTax = true
 -- (which names every one), cross-checked against Dustman and LootDrop.
 local CRAFTS = {
     {
-        key = "BLACKSMITHING", label = "Blacksmithing", short = "BS",
+        key = "BLACKSMITHING", label = "Blacksmithing", short = "BS", craftingTypeName = "CRAFTING_TYPE_BLACKSMITHING",
         tempers = { green = 54170, blue = 54171, purple = 54172, gold = 54173 },
         materials = {
             { tier =  1, raw = 808   , refined = 5413   },
@@ -74,7 +74,7 @@ local CRAFTS = {
         },
     },
     {
-        key = "CLOTHING", label = "Clothing", short = "CL",
+        key = "CLOTHING", label = "Clothing", short = "CL", craftingTypeName = "CRAFTING_TYPE_CLOTHIER",
         tempers = { green = 54174, blue = 54175, purple = 54176, gold = 54177 },
         materials = {
             { tier =  1, raw = 812   , refined = 811    },
@@ -100,7 +100,7 @@ local CRAFTS = {
         },
     },
     {
-        key = "WOODWORKING", label = "Woodworking", short = "WW",
+        key = "WOODWORKING", label = "Woodworking", short = "WW", craftingTypeName = "CRAFTING_TYPE_WOODWORKING",
         tempers = { green = 54178, blue = 54179, purple = 54180, gold = 54181 },
         materials = {
             { tier =  1, raw = 802   , refined = 803    },
@@ -116,7 +116,7 @@ local CRAFTS = {
         },
     },
     {
-        key = "JEWELRY", label = "Jewelry", short = "JW",
+        key = "JEWELRY", label = "Jewelry", short = "JW", craftingTypeName = "CRAFTING_TYPE_JEWELRYCRAFTING",
         tempers = { green = 203631, blue = 203632, purple = 203633, gold = 203634 },
         materials = {
             { tier = 1, raw = 135137, refined = 135138 },
@@ -444,6 +444,14 @@ local function StackSize()
         if n and n > 0 then return n end
     end
     return 10
+end
+
+RC.StackSize = StackSize
+
+-- The model's temper rates for a given Meticulous Disassembly state, so the
+-- statistics view can put observed next to expected.
+function RC.ExpectedRates(mdActive)
+    return mdActive and TEMPER_RATES_MD or TEMPER_RATES_NO_MD
 end
 
 -- Returns a result table, or nil plus a reason string.
@@ -833,6 +841,19 @@ local function OnAddOnLoaded(event, addonName)
     SLASH_COMMANDS["/refinebest"] = function()
         if RC.UI then RC.UI:ShowRanking() end
     end
+    SLASH_COMMANDS["/refinestats"] = function(args)
+        if args and args:lower():find("reset", 1, true) then
+            if RC.Stats then RC.Stats.Reset() end
+            d(PREFIX .. "refining statistics cleared.")
+            if RC.UI and RC.UI.mode == "stats" then RC.UI:Refresh() end
+            return
+        end
+        if RC.UI then RC.UI:ShowStats() end
+    end
+
+    -- Recording starts as soon as the addon loads, so statistics accumulate
+    -- whether or not the window has ever been opened.
+    if RC.Stats then RC.Stats.Register(RC.name) end
     menuRegistered = RegisterContextMenu()
 
     -- Chat is not reliably up during add-on load, and ATT does not populate its

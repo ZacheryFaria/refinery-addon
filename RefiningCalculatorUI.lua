@@ -236,8 +236,11 @@ function UI:Create()
         UI:Refresh()
     end)
 
+    -- Detail -> Find best -> Stats -> Detail.
+    local MODE_CYCLE = { detail = "ranking", ranking = "stats", stats = "detail" }
     self.modeButton = self:MakeButton(self.header, 0, 120, 28, function()
-        UI.mode = (UI.mode == "ranking") and "detail" or "ranking"
+        UI.mode = MODE_CYCLE[UI.mode] or "detail"
+        UI.page = 1
         UI:Refresh()
     end)
     self.sortButton = self:MakeButton(self.header, 128, 140, 28, function()
@@ -591,6 +594,115 @@ function UI:SetPage(page)
 end
 
 --------------------------------------------------------------------------------
+-- Statistics view
+--------------------------------------------------------------------------------
+
+-- Observed versus expected, for checking the model against real refines.
+function UI:RenderStats()
+    self:Create()
+    self:PopulateDropdowns()
+
+    local md = RC.GetMD()
+    local s = RC.Stats.Summary(md.active)
+    local other = RC.Stats.CountFor(not md.active)
+
+    self.title:SetText("Refining statistics")
+    local mdText, mdState = RC.DescribeMD(md)
+    self.subtitle:SetText(mdText .. " -- showing samples recorded in this state")
+    self.subtitle:SetColor(unpack(mdState == "active" and COLOR_GOOD or COLOR_WARN))
+
+    local h = self.headerRow.cells
+    h.name:SetText("Measure")
+    h.src:SetText("")
+    h.price:SetText("Observed")
+    h.qty:SetText("Expected")
+    h.value:SetText("Diff")
+    h.vol:SetText("Refines")
+
+    local function Pct(v) return string.format("%.2f%%", v * 100) end
+
+    local function Compare(label, observed, expected, samples, isRate)
+        local diff = expected ~= 0 and ((observed - expected) / expected) or 0
+        local color = COLOR_DIM
+        if samples > 0 then
+            color = (math.abs(diff) <= 0.05) and COLOR_GOOD or COLOR_WARN
+        end
+        return {
+            name  = label,
+            price = samples > 0 and (isRate and Pct(observed) or string.format("%.3f", observed)) or "--",
+            qty   = isRate and Pct(expected) or string.format("%.3f", expected),
+            value = samples > 0 and string.format("%+.1f%%", diff * 100) or "--",
+            vol   = RC.FormatGold(samples),
+        }, color
+    end
+
+    local i = 0
+
+    -- Refined yield is per craft: each craft line has its own extraction passive.
+    for _, entry in ipairs(s.byCraft) do
+        local t = entry.total
+        local observed = t.raw > 0 and (t.refined / t.raw) or 0
+        local values, color = Compare(entry.craft.label .. " refined/raw",
+            observed, RC.refinedPerRaw, t.refines, false)
+        i = i + 1
+        self:SetRow(i, values, color)
+    end
+
+    i = i + 1
+    self:SetRow(i, { name = "-- temper drops per refine --" }, COLOR_DIM)
+
+    -- Temper rates are game-wide, so every craft's samples pool together.
+    for _, tier in ipairs(s.tiers) do
+        local observed = s.overall.refines > 0 and (s.overall[tier] / s.overall.refines) or 0
+        local values, color = Compare(tier, observed, s.expected[tier], s.overall.refines, true)
+        i = i + 1
+        self:SetRow(i, values, color)
+    end
+
+    for j = i + 1, #self.rows do
+        self.rows[j].control:SetHidden(true)
+    end
+
+    local tableHeight = (i + 1) * ROW_H
+    self.tableArea:SetHeight(tableHeight)
+
+    local total = s.overall.refines
+    if total == 0 then
+        self.verdict:SetText("No refines recorded yet in this state.")
+        self.verdict:SetColor(unpack(COLOR_WARN))
+    else
+        self.verdict:SetText(string.format("%s refines recorded, %s raw consumed.",
+            RC.FormatGold(total), RC.FormatGold(s.overall.raw)))
+        self.verdict:SetColor(unpack(COLOR_TEXT))
+    end
+    self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
+
+    -- Rates converge slowly. Saying so stops a handful of refines being read as
+    -- the model being wrong.
+    if total < 100 then
+        self.perBatch:SetText("Small samples swing widely -- expect a few hundred refines before this settles.")
+    else
+        self.perBatch:SetText("Diff within 5% is shown green. Gold tempers need the most refines to converge.")
+    end
+    self.perBatch:SetColor(unpack(COLOR_DIM))
+    self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
+
+    if other > 0 then
+        self.note:SetText(string.format(
+            "%s more refines recorded with MD %s; those are kept separate.",
+            RC.FormatGold(other), md.active and "off" or "on"))
+    else
+        self.note:SetText("Recorded automatically while refining. /refinestats reset clears them.")
+    end
+    self.note:SetAnchor(TOPLEFT, self.perBatch, BOTTOMLEFT, 0, 4)
+
+    self:UpdatePaging()
+    self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
+    self.footer:SetHeight(0)
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74)
+end
+
+--------------------------------------------------------------------------------
 -- Public
 --------------------------------------------------------------------------------
 
@@ -605,7 +717,9 @@ end
 -- Button captions track state, so they say what clicking will do.
 function UI:UpdateButtons()
     if self.modeButton then
-        self.modeButton:SetText(self.mode == "ranking" and "Detail" or "Find best")
+        -- The caption names the view the click will take you to.
+        local next = { detail = "Find best", ranking = "Statistics", stats = "Detail" }
+        self.modeButton:SetText(next[self.mode] or "Detail")
     end
     if self.sortButton then
         local label = "Sort"
@@ -631,6 +745,12 @@ function UI:Refresh()
 
     if self.mode == "ranking" then
         self:RenderRanking()
+        self.window:SetHidden(false)
+        return true
+    end
+
+    if self.mode == "stats" then
+        self:RenderStats()
         self.window:SetHidden(false)
         return true
     end
@@ -668,6 +788,15 @@ end
 function UI:ShowRanking()
     self:Create()
     self.mode = "ranking"
+    self.page = 1
+    self:Refresh()
+    self.window:SetHidden(false)
+    return true
+end
+
+function UI:ShowStats()
+    self:Create()
+    self.mode = "stats"
     self:Refresh()
     self.window:SetHidden(false)
     return true
