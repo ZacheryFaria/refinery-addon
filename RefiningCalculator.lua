@@ -95,20 +95,35 @@ local MET_DIS_ID = 83
 local CHAMPION_BAR_SLOTS = 12
 
 local function GetMeticulousDisassembly()
-    local spent   = GetNumPointsSpentOnChampionSkill(MET_DIS_ID) or 0
-    local maxPts  = GetChampionSkillMaxPoints(MET_DIS_ID) or 50
+    local spent    = GetNumPointsSpentOnChampionSkill(MET_DIS_ID) or 0
+    local maxPts   = GetChampionSkillMaxPoints(MET_DIS_ID) or 50
+    local invested = spent >= maxPts
+
+    -- Ask the game whether this star is slottable rather than assuming it is.
+    -- A passive star applies from invested points alone; only a slottable one
+    -- has to be on the champion bar to do anything.
+    local slottable = false
+    if GetChampionSkillType and CanChampionSkillTypeBeSlotted then
+        slottable = CanChampionSkillTypeBeSlotted(GetChampionSkillType(MET_DIS_ID)) and true or false
+    end
+
     local slotted = false
-    for i = 1, CHAMPION_BAR_SLOTS do
-        if GetSlotBoundId(i, HOTBAR_CATEGORY_CHAMPION) == MET_DIS_ID then
-            slotted = true
-            break
+    if slottable then
+        for i = 1, CHAMPION_BAR_SLOTS do
+            if GetSlotBoundId(i, HOTBAR_CATEGORY_CHAMPION) == MET_DIS_ID then
+                slotted = true
+                break
+            end
         end
     end
+
     return {
-        spent   = spent,
-        maxPts  = maxPts,
-        slotted = slotted,
-        active  = slotted and spent >= maxPts,
+        spent     = spent,
+        maxPts    = maxPts,
+        invested  = invested,
+        slottable = slottable,
+        slotted   = slotted,
+        active    = invested and (not slottable or slotted),
     }
 end
 
@@ -116,16 +131,16 @@ end
 -- the window can colour the label instead. Neither has to parse the other.
 function RC.DescribeMD(md)
     if md.active then
-        return string.format("Meticulous Disassembly active (%d/%d, slotted)",
-            md.spent, md.maxPts), "active"
-    elseif md.slotted then
-        return string.format("MD slotted but only %d/%d points -- using base rates, real yield is between the two",
-            md.spent, md.maxPts), "partial"
-    elseif md.spent >= md.maxPts then
+        return string.format("Meticulous Disassembly active (%d/%d%s)",
+            md.spent, md.maxPts, md.slottable and ", slotted" or ""), "active"
+    elseif md.invested and md.slottable and not md.slotted then
         return string.format("MD maxed (%d/%d) but NOT slotted -- using base rates",
             md.spent, md.maxPts), "partial"
+    elseif md.spent > 0 then
+        return string.format("MD only %d/%d points -- using base rates, real yield is between the two",
+            md.spent, md.maxPts), "partial"
     end
-    return string.format("MD not active (%d/%d, not slotted) -- using base rates",
+    return string.format("MD not invested (%d/%d) -- using base rates",
         md.spent, md.maxPts), "inactive"
 end
 
@@ -290,7 +305,16 @@ function RC.Evaluate(mat, quantity)
         rawFee = rawFee or 0, rawCut = rawCut or 0, rawNet = rawNet,
         refineFee = refineFee or 0, refineCut = refineCut or 0, refineNet = refineNet,
         net = refineNet - rawNet,
+        -- Net scales linearly with quantity, so per-batch figures are just a
+        -- rescale. Useful because "your whole stock" is not a comparable unit
+        -- between materials or between sessions.
+        netPerRaw = quantity > 0 and (refineNet - rawNet) / quantity or 0,
     }
+end
+
+-- Net gain/loss for a standard batch, from an already-evaluated result.
+function RC.NetPer(r, batch)
+    return r.netPerRaw * batch
 end
 
 function RC.Report(mat, quantity)
@@ -339,11 +363,17 @@ function RC.Report(mat, quantity)
     d(Option("Sell raw", r.sellRawGross, r.rawFee, r.rawCut, r.rawNet))
     d(Option("Refine + sell", r.refineGross, r.refineFee, r.refineCut, r.refineNet))
 
+    local function Signed(v)
+        return (v >= 0 and "+" or "-") .. Gold(v >= 0 and v or -v) .. "g"
+    end
+
     if r.net >= 0 then
         d(string.format("  |c00FF00=> REFINE, +%sg|r", Gold(r.net)))
     else
         d(string.format("  |cFF4444=> SELL RAW, refining loses %sg|r", Gold(-r.net)))
     end
+    d(string.format("  |c888888per 100 raw: %s   per 200 raw: %s|r",
+        Signed(RC.NetPer(r, 100)), Signed(RC.NetPer(r, 200))))
 
     local note
     if not RC.applyTax then

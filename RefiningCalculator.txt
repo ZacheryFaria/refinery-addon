@@ -1,7 +1,7 @@
 ## Title: Refining Profit Calculator
 ## APIVersion: 101050
-## Version: 1.4.0
-## AddOnVersion: 140
+## Version: 1.5.0
+## AddOnVersion: 150
 ## Author: AI Assistant
 ## Description: Compares selling raw materials against refining them. Prices via LibPrice, switchable between Master Merchant, ATT, TTC or a blend of all three. Right-click a raw material for a breakdown window.
 ## DependsOn: LibCustomMenu

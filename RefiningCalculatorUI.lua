@@ -47,6 +47,23 @@ local function MakeLabel(parent, font, align, color)
     return label
 end
 
+-- Hovering an item name shows the real ESO item tooltip, which is what TTC and
+-- ATT decorate with their price lines.
+--
+-- PopupTooltip, not ItemTooltip, and that matters: TTC hooks SetLink only on
+-- PopupTooltip (it hooks ItemTooltip's SetBagItem/SetLootItem/etc. instead),
+-- while ATT hooks SetLink on both. So ItemTooltip:SetLink would show ATT's
+-- prices and silently omit TTC's.
+local function OnNameEnter(cell)
+    if not cell.itemLink then return end
+    InitializeTooltip(PopupTooltip, UI.window, RIGHT, -8, 0, LEFT)
+    PopupTooltip:SetLink(cell.itemLink)
+end
+
+local function OnNameExit()
+    ClearTooltip(PopupTooltip)
+end
+
 -- One table row: a cell per column, anchored left to right.
 local function MakeRow(parent, index, font)
     local row = WM:CreateControl(nil, parent, CT_CONTROL)
@@ -58,6 +75,13 @@ local function MakeRow(parent, index, font)
         local cell = MakeLabel(row, font, col.align)
         cell:SetDimensions(col.width, ROW_H)
         cell:SetAnchor(TOPLEFT, row, TOPLEFT, x, 0)
+        if col.key == "name" then
+            -- Handlers are attached once; itemLink is swapped per render, and
+            -- is nil on summary rows so those simply do not raise a tooltip.
+            cell:SetMouseEnabled(true)
+            cell:SetHandler("OnMouseEnter", OnNameEnter)
+            cell:SetHandler("OnMouseExit", OnNameExit)
+        end
         cells[col.key] = cell
         x = x + col.width
     end
@@ -176,6 +200,7 @@ function UI:Create()
 
     self.rows = {}
     self.verdict = MakeLabel(win, "ZoFontGameBold", TEXT_ALIGN_LEFT)
+    self.perBatch = MakeLabel(win, "ZoFontGame", TEXT_ALIGN_LEFT)
     self.note = MakeLabel(win, "ZoFontGameSmall", TEXT_ALIGN_LEFT, COLOR_DIM)
 
     -- Reserved for high/low/Meticulous scenario toggles later.
@@ -195,13 +220,16 @@ function UI:GetRow(index)
     return row
 end
 
-function UI:SetRow(index, values, color)
+-- itemLink is optional: pass it for real item rows, omit it on summary rows so
+-- they do not raise a tooltip.
+function UI:SetRow(index, values, color, itemLink)
     local row = self:GetRow(index)
     for _, col in ipairs(COLUMNS) do
         local cell = row.cells[col.key]
         cell:SetText(values[col.key] or "")
         cell:SetColor(unpack(color or COLOR_TEXT))
     end
+    row.cells.name.itemLink = itemLink
     return row
 end
 
@@ -234,7 +262,7 @@ function UI:Render(r)
         price = RC.FormatGold(r.pRaw),
         qty   = RC.FormatGold(r.quantity),
         value = RC.FormatGold(r.sellRawGross),
-    })
+    }, nil, r.rawLink)
 
     i = i + 1
     self:SetRow(i, { name = "-- or refine into --" }, COLOR_DIM)
@@ -246,7 +274,7 @@ function UI:Render(r)
         price = RC.FormatGold(r.pRefined),
         qty   = string.format("%.1f", r.refinedQty),
         value = RC.FormatGold(r.refinedGold),
-    })
+    }, nil, r.refinedLink)
 
     for _, tier in ipairs(r.rows) do
         i = i + 1
@@ -256,7 +284,7 @@ function UI:Render(r)
             price = tier.price and RC.FormatGold(tier.price) or "no data",
             qty   = string.format("%.2f", tier.count),
             value = tier.price and RC.FormatGold(tier.gold) or "0",
-        }, tier.price and COLOR_TEXT or COLOR_WARN)
+        }, tier.price and COLOR_TEXT or COLOR_WARN, tier.link)
     end
 
     i = i + 1
@@ -300,6 +328,14 @@ function UI:Render(r)
     end
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
+    local function Signed(v)
+        return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v) .. "g"
+    end
+    self.perBatch:SetText(string.format("per 100 raw: %s      per 200 raw: %s",
+        Signed(RC.NetPer(r, 100)), Signed(RC.NetPer(r, 200))))
+    self.perBatch:SetColor(unpack(r.net >= 0 and COLOR_GOOD or COLOR_BAD))
+    self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
+
     local note
     if not RC.applyTax then
         note = "Gross only -- fees disabled (RC.applyTax)."
@@ -309,11 +345,11 @@ function UI:Render(r)
         note = "Gross only -- the game would not report guild store fees."
     end
     self.note:SetText(string.format("%s  Refined yield %.2f/raw.", note, RC.refinedPerRaw))
-    self.note:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 4)
+    self.note:SetAnchor(TOPLEFT, self.perBatch, BOTTOMLEFT, 0, 4)
 
     self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
-    -- title + subtitle, header row of dropdowns, the table, then verdict + note.
-    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 52)
+    -- title + subtitle, dropdown row, table, then verdict + per-batch + note.
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74)
 end
 
 --------------------------------------------------------------------------------
@@ -341,6 +377,7 @@ function UI:Refresh()
         self.subtitle:SetColor(unpack(COLOR_BAD))
         for _, row in ipairs(self.rows) do row.control:SetHidden(true) end
         self.verdict:SetText("")
+        self.perBatch:SetText("")
         self.note:SetText("")
         self.window:SetHidden(false)
         return false
