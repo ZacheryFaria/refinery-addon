@@ -58,7 +58,7 @@ RC.applyTax = true
 -- (which names every one), cross-checked against Dustman and LootDrop.
 local CRAFTS = {
     {
-        key = "BLACKSMITHING", label = "Blacksmithing",
+        key = "BLACKSMITHING", label = "Blacksmithing", short = "BS",
         tempers = { green = 54170, blue = 54171, purple = 54172, gold = 54173 },
         materials = {
             { tier =  1, raw = 808   , refined = 5413   },
@@ -74,7 +74,7 @@ local CRAFTS = {
         },
     },
     {
-        key = "CLOTHING", label = "Clothing",
+        key = "CLOTHING", label = "Clothing", short = "CL",
         tempers = { green = 54174, blue = 54175, purple = 54176, gold = 54177 },
         materials = {
             { tier =  1, raw = 812   , refined = 811    },
@@ -100,7 +100,7 @@ local CRAFTS = {
         },
     },
     {
-        key = "WOODWORKING", label = "Woodworking",
+        key = "WOODWORKING", label = "Woodworking", short = "WW",
         tempers = { green = 54178, blue = 54179, purple = 54180, gold = 54181 },
         materials = {
             { tier =  1, raw = 802   , refined = 803    },
@@ -116,7 +116,7 @@ local CRAFTS = {
         },
     },
     {
-        key = "JEWELRY", label = "Jewelry",
+        key = "JEWELRY", label = "Jewelry", short = "JW",
         tempers = { green = 203631, blue = 203632, purple = 203633, gold = 203634 },
         materials = {
             { tier = 1, raw = 135137, refined = 135138 },
@@ -234,6 +234,8 @@ end
 
 local MD_COLOR = { active = "|c00FF00", partial = "|cFFAA00", inactive = "|cFFAA00" }
 
+RC.GetMD = GetMeticulousDisassembly
+
 --------------------------------------------------------------------------------
 -- Pricing
 --------------------------------------------------------------------------------
@@ -293,9 +295,26 @@ local function SourceRange(itemLink, key)
     return { low = avg, mid = avg, high = avg }
 end
 
+-- Ranking evaluates every material at once, which asks about ~106 distinct
+-- items. ATT answers each by scanning its sales history twice (a 3-day window,
+-- then a 90-day one), so doing that uncached would stutter badly. Cached for the
+-- session; the window's Refresh button and any source change clear it.
+local priceCache = {}
+
+function RC.ClearPriceCache()
+    priceCache = {}
+end
+
 -- Returns a {low, mid, high} table plus a source label, or nil.
 local function GetPrice(itemLink)
     if not (LibPrice and LibPrice.ItemLinkToPriceData) then return nil, "nolib" end
+
+    local cacheKey = RC.priceSource .. "\t" .. itemLink
+    local hit = priceCache[cacheKey]
+    if hit ~= nil then
+        if hit == false then return nil, "nodata" end
+        return hit.price, hit.source
+    end
 
     local keys
     if RC.priceSource == "blend" then
@@ -315,13 +334,19 @@ local function GetPrice(itemLink)
             used[#used + 1] = key
         end
     end
-    if count == 0 then return nil, "nodata" end
+    if count == 0 then
+        priceCache[cacheKey] = false
+        return nil, "nodata"
+    end
 
-    return {
+    local price = {
         low  = low / count,
         mid  = mid / count,
         high = high / count,
-    }, table.concat(used, "+")
+    }
+    local source = table.concat(used, "+")
+    priceCache[cacheKey] = { price = price, source = source }
+    return price, source
 end
 
 local function Gold(n)
@@ -481,6 +506,49 @@ end
 function RC.NetPer(r, batch, band)
     if r.quantity <= 0 then return 0 end
     return r.net[band or "mid"] / r.quantity * batch
+end
+
+-- Two different questions, so both are reported and either can sort:
+--
+--   net    -- refining beats selling the raw. The right measure when you
+--             already hold the material and are deciding what to do with it.
+--   refine -- what the refined output is worth, full stop. The right measure
+--             when you are farming nodes, because then the raw cost is sunk and
+--             "would it have sold for more raw" does not enter into it.
+--
+-- A material can rank high on one and poorly on the other.
+RC.RANK_SORTS = {
+    { key = "net",    label = "Sort: net gain" },
+    { key = "refine", label = "Sort: refined value" },
+}
+
+-- Evaluates every material. Returns a list of entries, unsorted.
+function RC.RankAll(batch)
+    batch = batch or 200
+    local list = {}
+    for _, mat in ipairs(MATERIALS) do
+        local r = RC.Evaluate(mat, batch)
+        if r then
+            list[#list + 1] = {
+                mat    = mat,
+                result = r,
+                net    = r.net.mid,
+                refine = r.refineNet.mid,
+                netLow = r.net.low,
+                netHigh = r.net.high,
+            }
+        end
+    end
+    return list
+end
+
+function RC.SortRanking(list, sortKey)
+    local key = (sortKey == "refine") and "refine" or "net"
+    table.sort(list, function(a, b)
+        if a[key] ~= b[key] then return a[key] > b[key] end
+        return RC.MaterialLabel(a.mat) < RC.MaterialLabel(b.mat)
+    end)
+    return list
 end
 
 function RC.Report(mat, quantity)
@@ -692,7 +760,7 @@ local menuRegistered = false
 local function OnPlayerActivated()
     EVENT_MANAGER:UnregisterForEvent(RC.name .. "_Activated", EVENT_PLAYER_ACTIVATED)
 
-    d(PREFIX .. "loaded. Right-click a raw material, or /refinecalc [qty] [material]. /refinetest sweeps all to chat.")
+    d(PREFIX .. "loaded. Right-click a raw material, /refinecalc [qty] [material], or /refinebest to rank everything.")
     if not menuRegistered then
         d(PREFIX .. "|cFF6666LibCustomMenu missing -- context menu disabled.|r")
     end
@@ -707,6 +775,9 @@ local function OnAddOnLoaded(event, addonName)
 
     SLASH_COMMANDS["/refinetest"] = OnSlashTest
     SLASH_COMMANDS["/refinecalc"] = OnSlashCalc
+    SLASH_COMMANDS["/refinebest"] = function()
+        if RC.UI then RC.UI:ShowRanking() end
+    end
     menuRegistered = RegisterContextMenu()
 
     -- Chat is not reliably up during add-on load, and ATT does not populate its

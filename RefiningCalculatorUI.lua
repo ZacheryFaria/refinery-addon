@@ -14,11 +14,18 @@ local RC = RefiningCalculator
 local UI = {}
 RC.UI = UI
 
+UI.mode = "detail"    -- "detail" | "ranking"
+UI.sortKey = "net"    -- see RC.RANK_SORTS
+
 local WM = WINDOW_MANAGER
 
 local WIN_NAME = "RefiningCalculatorWindow"
 local WIDTH, PAD, ROW_H = 460, 12, 20
-local HEADER_H = 30
+local HEADER_H = 58  -- two rows: dropdowns, then buttons
+
+-- Ranking lists every material; showing all 45 would make the window taller
+-- than many screens, and the point of the view is the top of the list.
+local RANK_LIMIT = 20
 
 -- width is the column box; align is where the text sits inside it.
 local COLUMNS = {
@@ -64,6 +71,12 @@ local function OnNameExit()
     ClearTooltip(PopupTooltip)
 end
 
+-- Ranking rows are clickable: click one to open its detail view. The handler is
+-- attached once and reads a per-render field, like the tooltip link above.
+local function OnNameClick(cell)
+    if cell.onClick then cell.onClick() end
+end
+
 -- One table row: a cell per column, anchored left to right.
 local function MakeRow(parent, index, font)
     local row = WM:CreateControl(nil, parent, CT_CONTROL)
@@ -81,6 +94,7 @@ local function MakeRow(parent, index, font)
             cell:SetMouseEnabled(true)
             cell:SetHandler("OnMouseEnter", OnNameEnter)
             cell:SetHandler("OnMouseExit", OnNameExit)
+            cell:SetHandler("OnMouseUp", OnNameClick)
         end
         cells[col.key] = cell
         x = x + col.width
@@ -105,6 +119,16 @@ function UI:MakeDropdown(parent, x, width, onSelect)
     combo:SetDropdownFont("ZoFontGameSmall")
 
     return { container = container, combo = combo, onSelect = onSelect }
+end
+
+function UI:MakeButton(parent, x, width, height, onClick)
+    local button = WM:CreateControlFromVirtual(
+        WIN_NAME .. "Button" .. tostring(x), parent, "ZO_DefaultButton")
+    if not button then return nil end
+    button:SetDimensions(width, height)
+    button:SetAnchor(TOPLEFT, parent, TOPLEFT, x, 30)
+    button:SetHandler("OnClicked", onClick)
+    return button
 end
 
 -- Rebuilt on every render so availability reflects what is loaded right now.
@@ -199,6 +223,22 @@ function UI:Create()
     self.sourceDropdown = self:MakeDropdown(self.header, 212, 224, function(_, _, entry)
         if UI.updatingDropdowns then return end
         RC.priceSource = entry.key
+        -- Cached prices are keyed per source, but clearing keeps memory bounded
+        -- and guarantees a source switch reflects fresh data.
+        RC.ClearPriceCache()
+        UI:Refresh()
+    end)
+
+    self.modeButton = self:MakeButton(self.header, 0, 130, 28, function()
+        UI.mode = (UI.mode == "ranking") and "detail" or "ranking"
+        UI:Refresh()
+    end)
+    self.sortButton = self:MakeButton(self.header, 138, 150, 28, function()
+        UI.sortKey = (UI.sortKey == "refine") and "net" or "refine"
+        UI:Refresh()
+    end)
+    self.refreshButton = self:MakeButton(self.header, 296, 140, 28, function()
+        RC.ClearPriceCache()
         UI:Refresh()
     end)
 
@@ -243,6 +283,7 @@ function UI:SetRow(index, values, color, itemLink)
         cell:SetColor(unpack(color or COLOR_TEXT))
     end
     row.cells.name.itemLink = itemLink
+    row.cells.name.onClick = nil
 
     -- Item names take their in-game quality colour, so Dreugh Wax reads gold and
     -- Honing Stone green. Only when the row has no explicit colour override, so
@@ -386,6 +427,79 @@ function UI:Render(r)
 end
 
 --------------------------------------------------------------------------------
+-- Ranking view
+--------------------------------------------------------------------------------
+
+function UI:RenderRanking()
+    self:Create()
+    self:PopulateDropdowns()
+
+    local batch = 200
+    local list = RC.SortRanking(RC.RankAll(batch), self.sortKey)
+
+    self.title:SetText(string.format("Most profitable to refine -- per %d raw", batch))
+    local mdText, mdState = RC.DescribeMD(RC.GetMD())
+    self.subtitle:SetText(mdText)
+    self.subtitle:SetColor(unpack(mdState == "active" and COLOR_GOOD or COLOR_WARN))
+
+    local h = self.headerRow.cells
+    h.name:SetText("Item")
+    h.src:SetText("Craft")
+    h.price:SetText("Tier")
+    h.qty:SetText("Refined")
+    h.value:SetText("Net")
+
+    local i = 0
+    for index, entry in ipairs(list) do
+        if index > RANK_LIMIT then break end
+        i = i + 1
+        local link = RC.RefinedLink(entry.mat)
+        local row = self:SetRow(i, {
+            name  = RC.MaterialLabel(entry.mat),
+            src   = entry.mat.craft.short,
+            price = tostring(entry.mat.tier),
+            qty   = RC.FormatGold(entry.refine),
+            value = (entry.net >= 0 and "+" or "-") .. RC.FormatGold(math.abs(entry.net)),
+        }, nil, link)
+
+        -- Net is the column that decides refine-vs-sell, so colour that cell
+        -- rather than the whole row, which keeps the quality colour on the name.
+        row.cells.value:SetColor(unpack(entry.net >= 0 and COLOR_GOOD or COLOR_BAD))
+
+        local mat = entry.mat
+        row.cells.name.onClick = function()
+            UI.mode = "detail"
+            UI:SetTarget(mat)
+        end
+    end
+
+    for j = i + 1, #self.rows do
+        self.rows[j].control:SetHidden(true)
+    end
+
+    local tableHeight = (i + 1) * ROW_H
+    self.tableArea:SetHeight(tableHeight)
+
+    self.verdict:SetText(string.format("Showing top %d of %d. Click a row for detail.",
+        math.min(RANK_LIMIT, #list), #list))
+    self.verdict:SetColor(unpack(COLOR_TEXT))
+    self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
+
+    self.perBatch:SetText(self.sortKey == "refine"
+        and "Refined = value of the refined output. Use when farming: the raw is free."
+        or  "Net = refining beats selling raw. Use when you already hold the material.")
+    self.perBatch:SetColor(unpack(COLOR_DIM))
+    self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
+
+    self.note:SetText(string.format("Refined yield %.2f/raw. Prices cached -- use Refresh for fresh data.",
+        RC.refinedPerRaw))
+    self.note:SetAnchor(TOPLEFT, self.perBatch, BOTTOMLEFT, 0, 4)
+
+    self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74)
+end
+
+--------------------------------------------------------------------------------
 -- Public
 --------------------------------------------------------------------------------
 
@@ -397,7 +511,30 @@ function UI:SetTarget(mat, quantity)
     return self:Refresh()
 end
 
+-- Button captions track state, so they say what clicking will do.
+function UI:UpdateButtons()
+    if self.modeButton then
+        self.modeButton:SetText(self.mode == "ranking" and "Detail" or "Find best")
+    end
+    if self.sortButton then
+        self.sortButton:SetText(self.sortKey == "refine" and "Sort: refined" or "Sort: net")
+        self.sortButton:SetHidden(self.mode ~= "ranking")
+    end
+    if self.refreshButton then
+        self.refreshButton:SetText("Refresh prices")
+    end
+end
+
 function UI:Refresh()
+    self:Create()
+    self:UpdateButtons()
+
+    if self.mode == "ranking" then
+        self:RenderRanking()
+        self.window:SetHidden(false)
+        return true
+    end
+
     if not self.mat then return false end
     local r, err = RC.Evaluate(self.mat, self.quantity)
     if not r then
@@ -420,9 +557,20 @@ function UI:Refresh()
     return true
 end
 
+-- Asking for a specific material means the detail view, even if the window was
+-- last left showing the ranking.
 function UI:Show(mat, quantity)
     self:Create()
+    if mat then self.mode = "detail" end
     return self:SetTarget(mat, quantity)
+end
+
+function UI:ShowRanking()
+    self:Create()
+    self.mode = "ranking"
+    self:Refresh()
+    self.window:SetHidden(false)
+    return true
 end
 
 function UI:Hide()
