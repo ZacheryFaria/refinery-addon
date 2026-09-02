@@ -448,6 +448,15 @@ end
 
 RC.StackSize = StackSize
 
+-- Exposed for the statistics view, which values recorded quantities the same way
+-- the detail view values projected ones.
+RC.PriceOf = GetPrice
+
+function RC.NetAfterFees(gross)
+    local _, _, net = TaxOn(gross)
+    return net or gross
+end
+
 -- The model's temper rates for a given Meticulous Disassembly state, so the
 -- statistics view can put observed next to expected.
 function RC.ExpectedRates(mdActive)

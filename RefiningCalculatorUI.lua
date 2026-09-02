@@ -570,7 +570,8 @@ end
 -- more than one page to move between.
 function UI:UpdatePaging()
     local pages = self.pages or 1
-    local show = (self.mode == "ranking") and pages > 1
+    -- Both the ranking and the statistics view page; only the detail view does not.
+    local show = (self.mode == "ranking" or self.mode == "stats") and pages > 1
 
     if self.pageLabel then
         self.pageLabel:SetText(string.format("Page %d of %d", self.page, pages))
@@ -597,7 +598,112 @@ end
 -- Statistics view
 --------------------------------------------------------------------------------
 
--- Observed versus expected, for checking the model against real refines.
+local function Pct(v) return string.format("%.2f%%", v * 100) end
+
+local function Signed(v)
+    return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v)
+end
+
+-- Observed versus expected for one measure. Green when within 5%, which at
+-- small sample sizes means little -- the view says so separately.
+local function Compare(label, observed, expected, samples, isRate)
+    local diff = expected ~= 0 and ((observed - expected) / expected) or 0
+    local color = COLOR_DIM
+    if samples > 0 then
+        color = (math.abs(diff) <= 0.05) and COLOR_GOOD or COLOR_WARN
+    end
+    local function Fmt(v) return isRate and Pct(v) or string.format("%.3f", v) end
+    return {
+        name  = label,
+        price = samples > 0 and Fmt(observed) or "--",
+        qty   = Fmt(expected),
+        value = samples > 0 and string.format("%+.1f%%", diff * 100) or "--",
+        vol   = RC.FormatGold(samples),
+    }, color
+end
+
+-- Page 1 is the money question: per craft, did refining beat selling the raw?
+function UI:RenderStatsMoney(s, i)
+    local h = self.headerRow.cells
+    h.name:SetText("Craft")
+    h.src:SetText("N")
+    h.price:SetText("Yield")
+    h.qty:SetText("Raw worth")
+    h.value:SetText("Output")
+    h.vol:SetText("Profit")
+
+    for _, entry in ipairs(s.byCraft) do
+        local t = entry.total
+        i = i + 1
+        if t.refines == 0 then
+            self:SetRow(i, { name = entry.craft.label, src = "0", price = "--",
+                qty = "--", value = "--", vol = "--" }, COLOR_DIM)
+        else
+            local row = self:SetRow(i, {
+                name  = entry.craft.label,
+                src   = RC.FormatGold(t.refines),
+                price = string.format("%.3f", t.raw > 0 and (t.refined / t.raw) or 0),
+                qty   = RC.FormatGold(entry.rawGold),
+                value = RC.FormatGold(entry.outGold),
+                vol   = Signed(entry.profit),
+            })
+            row.cells.vol:SetColor(unpack(entry.profit >= 0 and COLOR_GOOD or COLOR_BAD))
+        end
+    end
+
+    i = i + 1
+    local totalRow = self:SetRow(i, {
+        name  = "All crafts",
+        src   = RC.FormatGold(s.overall.refines),
+        price = string.format("%.3f", s.overall.raw > 0 and (s.overall.refined / s.overall.raw) or 0),
+        qty   = RC.FormatGold(s.rawGold),
+        value = RC.FormatGold(s.outGold),
+        vol   = Signed(s.profit),
+    })
+    totalRow.cells.vol:SetColor(unpack(s.profit >= 0 and COLOR_GOOD or COLOR_BAD))
+    return i
+end
+
+-- Later pages are one craft each: its yield against the model, and its own
+-- temper drop rates rather than a pooled figure.
+function UI:RenderStatsCraft(s, i, entry)
+    local h = self.headerRow.cells
+    h.name:SetText(entry.craft.label)
+    h.src:SetText("")
+    h.price:SetText("Observed")
+    h.qty:SetText("Expected")
+    h.value:SetText("Diff")
+    h.vol:SetText("Refines")
+
+    local t = entry.total
+    local yield = t.raw > 0 and (t.refined / t.raw) or 0
+    i = i + 1
+    self:SetRow(i, (Compare("refined per raw", yield, RC.refinedPerRaw, t.refines, false)))
+
+    i = i + 1
+    self:SetRow(i, { name = "-- temper drops per refine --" }, COLOR_DIM)
+
+    for _, tier in ipairs(s.tiers) do
+        local observed = t.refines > 0 and (t[tier] / t.refines) or 0
+        local values, color = Compare(tier, observed, s.expected[tier], t.refines, true)
+        i = i + 1
+        self:SetRow(i, values, color)
+    end
+
+    i = i + 1
+    self:SetRow(i, { name = "-- gold, at today's prices --" }, COLOR_DIM)
+
+    i = i + 1
+    self:SetRow(i, { name = "raw worth", price = RC.FormatGold(entry.rawGold) })
+    i = i + 1
+    self:SetRow(i, { name = "refined + tempers", price = RC.FormatGold(entry.outGold) })
+    i = i + 1
+    local row = self:SetRow(i, { name = "profit", price = Signed(entry.profit) })
+    row.cells.price:SetColor(unpack(entry.profit >= 0 and COLOR_GOOD or COLOR_BAD))
+
+    return i
+end
+
 function UI:RenderStats()
     self:Create()
     self:PopulateDropdowns()
@@ -606,57 +712,25 @@ function UI:RenderStats()
     local s = RC.Stats.Summary(md.active)
     local other = RC.Stats.CountFor(not md.active)
 
-    self.title:SetText("Refining statistics")
+    -- Page 1 is the money summary; one page per craft follows.
+    local pages = 1 + #s.byCraft
+    if self.page > pages then self.page = pages end
+    if self.page < 1 then self.page = 1 end
+    self.pages = pages
+
+    local entry = s.byCraft[self.page - 1]
+    self.title:SetText(entry and ("Refining statistics -- " .. entry.craft.label)
+        or "Refining statistics")
+
     local mdText, mdState = RC.DescribeMD(md)
     self.subtitle:SetText(mdText .. " -- showing samples recorded in this state")
     self.subtitle:SetColor(unpack(mdState == "active" and COLOR_GOOD or COLOR_WARN))
 
-    local h = self.headerRow.cells
-    h.name:SetText("Measure")
-    h.src:SetText("")
-    h.price:SetText("Observed")
-    h.qty:SetText("Expected")
-    h.value:SetText("Diff")
-    h.vol:SetText("Refines")
-
-    local function Pct(v) return string.format("%.2f%%", v * 100) end
-
-    local function Compare(label, observed, expected, samples, isRate)
-        local diff = expected ~= 0 and ((observed - expected) / expected) or 0
-        local color = COLOR_DIM
-        if samples > 0 then
-            color = (math.abs(diff) <= 0.05) and COLOR_GOOD or COLOR_WARN
-        end
-        return {
-            name  = label,
-            price = samples > 0 and (isRate and Pct(observed) or string.format("%.3f", observed)) or "--",
-            qty   = isRate and Pct(expected) or string.format("%.3f", expected),
-            value = samples > 0 and string.format("%+.1f%%", diff * 100) or "--",
-            vol   = RC.FormatGold(samples),
-        }, color
-    end
-
     local i = 0
-
-    -- Refined yield is per craft: each craft line has its own extraction passive.
-    for _, entry in ipairs(s.byCraft) do
-        local t = entry.total
-        local observed = t.raw > 0 and (t.refined / t.raw) or 0
-        local values, color = Compare(entry.craft.label .. " refined/raw",
-            observed, RC.refinedPerRaw, t.refines, false)
-        i = i + 1
-        self:SetRow(i, values, color)
-    end
-
-    i = i + 1
-    self:SetRow(i, { name = "-- temper drops per refine --" }, COLOR_DIM)
-
-    -- Temper rates are game-wide, so every craft's samples pool together.
-    for _, tier in ipairs(s.tiers) do
-        local observed = s.overall.refines > 0 and (s.overall[tier] / s.overall.refines) or 0
-        local values, color = Compare(tier, observed, s.expected[tier], s.overall.refines, true)
-        i = i + 1
-        self:SetRow(i, values, color)
+    if entry then
+        i = self:RenderStatsCraft(s, i, entry)
+    else
+        i = self:RenderStatsMoney(s, i)
     end
 
     for j = i + 1, #self.rows do
@@ -670,19 +744,23 @@ function UI:RenderStats()
     if total == 0 then
         self.verdict:SetText("No refines recorded yet in this state.")
         self.verdict:SetColor(unpack(COLOR_WARN))
+    elseif s.priced then
+        self.verdict:SetText(string.format("%s refines, %s raw consumed. Overall %sg.",
+            RC.FormatGold(total), RC.FormatGold(s.overall.raw), Signed(s.profit)))
+        self.verdict:SetColor(unpack(s.profit >= 0 and COLOR_GOOD or COLOR_BAD))
     else
-        self.verdict:SetText(string.format("%s refines recorded, %s raw consumed.",
+        self.verdict:SetText(string.format("%s refines, %s raw consumed. No prices available.",
             RC.FormatGold(total), RC.FormatGold(s.overall.raw)))
-        self.verdict:SetColor(unpack(COLOR_TEXT))
+        self.verdict:SetColor(unpack(COLOR_WARN))
     end
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
-    -- Rates converge slowly. Saying so stops a handful of refines being read as
-    -- the model being wrong.
+    -- Both sides are valued now, not at the time of each refine, so this answers
+    -- "was refining the right call" rather than "what did I bank that day".
     if total < 100 then
-        self.perBatch:SetText("Small samples swing widely -- expect a few hundred refines before this settles.")
+        self.perBatch:SetText("Small samples swing widely -- expect a few hundred refines before rates settle.")
     else
-        self.perBatch:SetText("Diff within 5% is shown green. Gold tempers need the most refines to converge.")
+        self.perBatch:SetText("Gold values both sides at today's prices, after fees.")
     end
     self.perBatch:SetColor(unpack(COLOR_DIM))
     self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
@@ -698,8 +776,8 @@ function UI:RenderStats()
 
     self:UpdatePaging()
     self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
-    self.footer:SetHeight(0)
-    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74)
+    self.footer:SetHeight(30)
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74 + 30)
 end
 
 --------------------------------------------------------------------------------

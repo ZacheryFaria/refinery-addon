@@ -157,21 +157,64 @@ function Stats.Summary(mdActive)
     local samples = (Stats.data and Stats.data.samples) or {}
 
     local byCraft, overall = {}, NewBucket()
+    local grandRaw, grandOut, anyPriced = 0, 0, false
+
     for _, craft in ipairs(RC.CRAFTS) do
         local total = NewBucket()
+        -- Money has to be valued per material: every tier prices differently, so
+        -- a craft-level quantity could not be valued meaningfully.
+        local rawGold, outGold, priced = 0, 0, false
+
         for _, mat in ipairs(craft.materials) do
             local perItem = samples[mat.raw]
             local bucket = perItem and perItem[key]
-            if bucket then
+            if bucket and (bucket.refines or 0) > 0 then
                 total.refines = total.refines + (bucket.refines or 0)
                 total.raw     = total.raw + (bucket.raw or 0)
                 total.refined = total.refined + (bucket.refined or 0)
                 for _, tier in ipairs(TIERS) do
                     total[tier] = total[tier] + (bucket[tier] or 0)
                 end
+
+                local pRaw = RC.PriceOf(RC.RawLink(mat))
+                local pRef = RC.PriceOf(RC.RefinedLink(mat))
+                if pRaw then
+                    rawGold = rawGold + (bucket.raw or 0) * pRaw
+                    priced = true
+                end
+                if pRef then
+                    outGold = outGold + (bucket.refined or 0) * pRef
+                    priced = true
+                end
             end
         end
-        byCraft[#byCraft + 1] = { craft = craft, total = total }
+
+        -- Tempers are shared across the craft, so they are valued once here.
+        for _, tier in ipairs(TIERS) do
+            local count = total[tier]
+            if count > 0 then
+                local p = RC.PriceOf(RC.TemperLink(craft, tier))
+                if p then
+                    outGold = outGold + count * p
+                    priced = true
+                end
+            end
+        end
+
+        -- Fees land on whichever side is actually sold, exactly as the detail
+        -- view applies them, so the two sides stay comparable.
+        local rawNet = RC.NetAfterFees(rawGold)
+        local outNet = RC.NetAfterFees(outGold)
+
+        byCraft[#byCraft + 1] = {
+            craft = craft, total = total,
+            priced = priced,
+            rawGold = rawNet, outGold = outNet, profit = outNet - rawNet,
+        }
+
+        grandRaw = grandRaw + rawNet
+        grandOut = grandOut + outNet
+        anyPriced = anyPriced or priced
 
         overall.refines = overall.refines + total.refines
         overall.raw     = overall.raw + total.raw
@@ -187,6 +230,10 @@ function Stats.Summary(mdActive)
         overall  = overall,
         expected = RC.ExpectedRates(mdActive),
         tiers    = TIERS,
+        priced   = anyPriced,
+        rawGold  = grandRaw,
+        outGold  = grandOut,
+        profit   = grandOut - grandRaw,
     }
 end
 
