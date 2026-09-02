@@ -18,6 +18,7 @@ local WM = WINDOW_MANAGER
 
 local WIN_NAME = "RefiningCalculatorWindow"
 local WIDTH, PAD, ROW_H = 460, 12, 20
+local HEADER_H = 30
 
 -- width is the column box; align is where the text sits inside it.
 local COLUMNS = {
@@ -63,6 +64,63 @@ local function MakeRow(parent, index, font)
     return { control = row, cells = cells }
 end
 
+-- A ZO_ComboBox lives in a container control; the object driving it comes from
+-- ZO_ComboBox_ObjectFromContainer. Entry callbacks receive (combo, text, entry),
+-- so anything the handler needs is stashed on the entry table itself.
+function UI:MakeDropdown(parent, x, width, onSelect)
+    local container = WM:CreateControlFromVirtual(
+        WIN_NAME .. "Dropdown" .. tostring(x), parent, "ZO_ComboBox")
+    if not container then return nil end
+
+    container:SetDimensions(width, 24)
+    container:SetAnchor(TOPLEFT, parent, TOPLEFT, x, 0)
+
+    local combo = ZO_ComboBox_ObjectFromContainer(container)
+    combo:SetSortsItems(false)
+    combo:SetSelectedItemFont("ZoFontGameSmall")
+    combo:SetDropdownFont("ZoFontGameSmall")
+
+    return { container = container, combo = combo, onSelect = onSelect }
+end
+
+-- Rebuilt on every render so availability reflects what is loaded right now.
+-- SetSelectedItem can re-fire the selection callback, so the guard stops that
+-- from looping back into Refresh while we are mid-populate.
+function UI:PopulateDropdowns()
+    if self.updatingDropdowns then return end
+    self.updatingDropdowns = true
+
+    if self.materialDropdown then
+        local dd = self.materialDropdown
+        dd.combo:ClearItems()
+        for _, mat in ipairs(RC.MATERIALS) do
+            local entry = dd.combo:CreateItemEntry(mat.label, dd.onSelect)
+            entry.mat = mat
+            dd.combo:AddItem(entry)
+        end
+        if self.mat then dd.combo:SetSelectedItem(self.mat.label) end
+    end
+
+    if self.sourceDropdown then
+        local dd = self.sourceDropdown
+        dd.combo:ClearItems()
+        local selected
+        for _, src in ipairs(RC.PRICE_SOURCES) do
+            -- Sources whose addon is not loaded stay selectable but say so,
+            -- rather than silently returning nothing.
+            local label = RC.SourceAvailable(src) and src.label
+                or (src.label .. " (not loaded)")
+            local entry = dd.combo:CreateItemEntry(label, dd.onSelect)
+            entry.key = src.key
+            dd.combo:AddItem(entry)
+            if src.key == RC.priceSource then selected = label end
+        end
+        if selected then dd.combo:SetSelectedItem(selected) end
+    end
+
+    self.updatingDropdowns = false
+end
+
 function UI:Create()
     if self.window then return self.window end
 
@@ -93,10 +151,19 @@ function UI:Create()
     self.subtitle = MakeLabel(win, "ZoFontGame", TEXT_ALIGN_LEFT, COLOR_DIM)
     self.subtitle:SetAnchor(TOPLEFT, self.title, BOTTOMLEFT, 0, 2)
 
-    -- Reserved for a material dropdown / quantity box later.
     self.header = WM:CreateControl(nil, win, CT_CONTROL)
-    self.header:SetDimensions(WIDTH - PAD * 2, 0)
+    self.header:SetDimensions(WIDTH - PAD * 2, HEADER_H)
     self.header:SetAnchor(TOPLEFT, self.subtitle, BOTTOMLEFT, 0, 6)
+
+    self.materialDropdown = self:MakeDropdown(self.header, 0, 200, function(_, _, entry)
+        if UI.updatingDropdowns then return end
+        UI:SetTarget(entry.mat)
+    end)
+    self.sourceDropdown = self:MakeDropdown(self.header, 212, 224, function(_, _, entry)
+        if UI.updatingDropdowns then return end
+        RC.priceSource = entry.key
+        UI:Refresh()
+    end)
 
     self.tableArea = WM:CreateControl(nil, win, CT_CONTROL)
     self.tableArea:SetDimensions(WIDTH - PAD * 2, ROW_H)
@@ -144,6 +211,7 @@ end
 
 function UI:Render(r)
     self:Create()
+    self:PopulateDropdowns()
 
     self.title:SetText(string.format("%s -- %s raw", r.mat.label, RC.FormatGold(r.quantity)))
     local mdText, mdState = RC.DescribeMD(r.md)
@@ -244,7 +312,8 @@ function UI:Render(r)
     self.note:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 4)
 
     self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
-    self.window:SetHeight(PAD * 2 + 44 + tableHeight + 52)
+    -- title + subtitle, header row of dropdowns, the table, then verdict + note.
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 52)
 end
 
 --------------------------------------------------------------------------------
@@ -264,6 +333,9 @@ function UI:Refresh()
     local r, err = RC.Evaluate(self.mat, self.quantity)
     if not r then
         self:Create()
+        -- Keep the dropdowns live: picking a source with no data must not trap
+        -- the user with no way to pick a different one.
+        self:PopulateDropdowns()
         self.title:SetText(self.mat.label)
         self.subtitle:SetText(err or "no data")
         self.subtitle:SetColor(unpack(COLOR_BAD))

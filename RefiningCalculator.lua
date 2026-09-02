@@ -135,12 +135,55 @@ local MD_COLOR = { active = "|c00FF00", partial = "|cFFAA00", inactive = "|cFFAA
 -- Pricing
 --------------------------------------------------------------------------------
 
--- LibPrice blends Master Merchant / ATT / TTC and already handles TTC rows that
--- carry no SuggestedPrice by falling through to Avg.
+-- LibPrice does NOT blend: ItemLinkToPriceGold walks its source list and returns
+-- the first source that has data, so "whatever LibPrice felt like" was really
+-- Master Merchant, then ATT, then TTC. Passing a source key restricts it to that
+-- one, which is what lets us offer them explicitly and average them ourselves.
+--
+-- It still handles TTC rows with no SuggestedPrice by falling through to Avg.
+--
+-- Deliberately excludes LibPrice's npc / crown / rolis / furc sources: an NPC
+-- vendor price is not a market price and would wreck an average.
+RC.MARKET_SOURCES = { "mm", "att", "ttc" }
+
+RC.PRICE_SOURCES = {
+    { key = "blend", label = "Blended (average)" },
+    { key = "mm",    label = "Master Merchant",   probe = "CanMMPrice"  },
+    { key = "att",   label = "Arkadius (ATT)",    probe = "CanATTPrice" },
+    { key = "ttc",   label = "Trade Centre (TTC)", probe = "CanTTCPrice" },
+}
+
+RC.priceSource = "blend"
+
+-- True if the addon behind a source is actually loaded and ready.
+function RC.SourceAvailable(entry)
+    if not LibPrice then return false end
+    if not entry.probe then return true end
+    local probe = LibPrice[entry.probe]
+    return probe ~= nil and probe() and true or false
+end
+
 local function GetPrice(itemLink)
     if not (LibPrice and LibPrice.ItemLinkToPriceGold) then return nil, "nolib" end
-    local gold, source = LibPrice.ItemLinkToPriceGold(itemLink)
-    if gold and gold > 0 then return gold, source end
+
+    if RC.priceSource ~= "blend" then
+        local gold, source = LibPrice.ItemLinkToPriceGold(itemLink, RC.priceSource)
+        if gold and gold > 0 then return gold, source end
+        return nil, "nodata"
+    end
+
+    -- Unweighted mean of whichever market sources have data. Equal weighting is
+    -- deliberate: sale counts are not comparable across these addons.
+    local sum, count, used = 0, 0, {}
+    for _, key in ipairs(RC.MARKET_SOURCES) do
+        local gold = LibPrice.ItemLinkToPriceGold(itemLink, key)
+        if gold and gold > 0 then
+            sum = sum + gold
+            count = count + 1
+            used[#used + 1] = key
+        end
+    end
+    if count > 0 then return sum / count, table.concat(used, "+") end
     return nil, "nodata"
 end
 
