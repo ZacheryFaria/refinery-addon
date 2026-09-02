@@ -165,9 +165,10 @@ end
 
 local TIERS = { "green", "blue", "purple", "gold" }
 
--- The three price scenarios carried through every calculation.
-local BANDS = { "low", "mid", "high" }
-RC.BANDS = BANDS
+-- Every calculation is per this many raw. A fixed unit makes materials
+-- comparable with each other and with the guild store, where a stack is 200.
+-- Only the stock line rescales to what you actually hold.
+RC.BATCH = 200
 
 function RC.RawLink(mat)     return Link(mat.raw) end
 function RC.RefinedLink(mat) return Link(mat.refined) end
@@ -268,31 +269,71 @@ function RC.SourceAvailable(entry)
     return probe ~= nil and probe() and true or false
 end
 
--- One source's low / mid / high, from the raw per-source data rather than
+-- One source's expected price, read from the per-source data rather than from
 -- ItemLinkToPriceGold. That matters because ItemLinkToPriceGold prefers TTC's
--- SuggestedPrice, which is a deliberately conservative figure -- it was making
--- every TTC number look like the bottom of the market.
+-- SuggestedPrice, a deliberately conservative figure that made every TTC number
+-- read as the bottom of the market.
 --
--- TTC carries a real spread (Min / Avg / Max). MM and ATT report a single
--- average, so for them low = mid = high and they simply do not widen the range.
-local function SourceRange(itemLink, key)
+-- Deliberately the average and nothing else. TTC also exposes Min and Max, but
+-- Max is the single highest listing anyone has posted -- one optimist asking
+-- 10x drags it off the scale, which is why a high-end estimate built on it was
+-- useless. The average is also the figure TTC and ATT show in their own item
+-- tooltips, so any number here can be checked by hovering the row.
+local function SourcePrice(itemLink, key)
     local data = LibPrice.ItemLinkToPriceData(itemLink, key)
     local info = data and data[key]
     if not info then return nil end
 
+    local avg
     if key == "ttc" then
-        local mid = info.Avg or info.SuggestedPrice
-        if not mid or mid <= 0 then return nil end
-        return {
-            low  = info.Min or info.SuggestedPrice or mid,
-            mid  = mid,
-            high = info.Max or mid,
-        }
+        avg = info.Avg or info.SuggestedPrice
+    else
+        avg = info.avgPrice or info.Avg or info.price
+    end
+    if not avg or avg <= 0 then return nil end
+    return avg
+end
+
+-- How much of this actually trades. A tempting margin on something with two
+-- listings and no sales is not a real opportunity, so the ranking filters on it.
+--
+-- TTC reports how many listings and how many units back its average. ATT knows
+-- how much sold, but LibPrice does not pass that through -- its normalizer
+-- literally reads "TODO: Count" -- so ATT is asked directly.
+RC.volumeDays = 30
+
+local function SourceVolume(itemLink, key)
+    if key == "ttc" then
+        local data = LibPrice.ItemLinkToPriceData(itemLink, "ttc")
+        local info = data and data.ttc
+        if not info then return 0 end
+        -- AmountCount is units listed; EntryCount is number of listings.
+        return info.AmountCount or info.EntryCount or 0
     end
 
-    local avg = info.avgPrice or info.Avg or info.price
-    if not avg or avg <= 0 then return nil end
-    return { low = avg, mid = avg, high = avg }
+    if key == "att" then
+        local sales = ArkadiusTradeTools and ArkadiusTradeTools.Modules
+            and ArkadiusTradeTools.Modules.Sales
+        if not (sales and sales.GetItemSalesInformation) then return 0 end
+        local since = GetTimeStamp() - (ZO_ONE_DAY_IN_SECONDS * RC.volumeDays)
+        local ok, info = pcall(function()
+            return sales:GetItemSalesInformation(itemLink, since)
+        end)
+        if not ok or not info or not info[itemLink] then return 0 end
+        local qty = 0
+        for _, sale in pairs(info[itemLink]) do
+            qty = qty + (sale.quantity or 0)
+        end
+        return qty
+    end
+
+    if key == "mm" then
+        local data = LibPrice.ItemLinkToPriceData(itemLink, "mm")
+        local info = data and data.mm
+        return (info and (info.numItems or info.numSales)) or 0
+    end
+
+    return 0
 end
 
 -- Ranking evaluates every material at once, which asks about ~106 distinct
@@ -312,8 +353,8 @@ local function GetPrice(itemLink)
     local cacheKey = RC.priceSource .. "\t" .. itemLink
     local hit = priceCache[cacheKey]
     if hit ~= nil then
-        if hit == false then return nil, "nodata" end
-        return hit.price, hit.source
+        if hit == false then return nil, "nodata", 0 end
+        return hit.price, hit.source, hit.volume
     end
 
     local keys
@@ -325,28 +366,29 @@ local function GetPrice(itemLink)
 
     -- Unweighted mean across whichever sources have data. Equal weighting is
     -- deliberate: sale counts are not comparable across these addons.
-    local low, mid, high, count, used = 0, 0, 0, 0, {}
+    local sum, count, used = 0, 0, {}
+    -- Volume takes the best evidence any source has, not an average: one source
+    -- simply not tracking an item should not read as low liquidity.
+    local volume = 0
     for _, key in ipairs(keys) do
-        local r = SourceRange(itemLink, key)
-        if r then
-            low, mid, high = low + r.low, mid + r.mid, high + r.high
+        local p = SourcePrice(itemLink, key)
+        if p then
+            sum = sum + p
             count = count + 1
             used[#used + 1] = key
         end
+        local v = SourceVolume(itemLink, key)
+        if v > volume then volume = v end
     end
     if count == 0 then
         priceCache[cacheKey] = false
-        return nil, "nodata"
+        return nil, "nodata", 0
     end
 
-    local price = {
-        low  = low / count,
-        mid  = mid / count,
-        high = high / count,
-    }
+    local price = sum / count
     local source = table.concat(used, "+")
-    priceCache[cacheKey] = { price = price, source = source }
-    return price, source
+    priceCache[cacheKey] = { price = price, source = source, volume = volume }
+    return price, source, volume
 end
 
 local function Gold(n)
@@ -358,40 +400,6 @@ local function ItemName(itemLink)
     local name = GetItemLinkName(itemLink)
     if not name or name == "" then return "?" end
     return zo_strformat(SI_TOOLTIP_ITEM_NAME, name)
-end
-
--- The colour an item link shows in chat is the item's quality colour, and the
--- surest way to get it exactly right is to let the game render the link rather
--- than to recompute it. Labels parse link markup, so putting the link in as the
--- text gives the real thing.
---
--- LINK_STYLE_DEFAULT (|H0:) renders the coloured name with no brackets;
--- LINK_STYLE_BRACKETS (|H1:) is the bracketed chat form.
-function RC.DisplayLink(itemLink)
-    if not itemLink then return "" end
-    return (itemLink:gsub("^|H%d", "|H0"))
-end
-
--- Belt and braces alongside the link text above: the cell's own colour.
--- GetItemQualityColor returns a ZO_ColorDef in some client versions and plain
--- r,g,b,a in others -- handling only one of those was why every row previously
--- fell back to flat grey.
-function RC.QualityColor(itemLink)
-    local getQuality = GetItemLinkDisplayQuality or GetItemLinkQuality
-    if not (getQuality and GetItemQualityColor) then return nil end
-
-    local quality = getQuality(itemLink)
-    if not quality then return nil end
-
-    local a1, a2, a3, a4 = GetItemQualityColor(quality)
-    if type(a1) == "table" then
-        if not a1.UnpackRGBA then return nil end
-        local r, g, b, a = a1:UnpackRGBA()
-        if not r then return nil end
-        return { r, g, b, a or 1 }
-    end
-    if type(a1) ~= "number" then return nil end
-    return { a1, a2 or 1, a3 or 1, a4 or 1 }
 end
 
 -- Names come from the game, so they are correct and localised without a table
@@ -437,7 +445,7 @@ end
 
 -- Returns a result table, or nil plus a reason string.
 function RC.Evaluate(mat, quantity)
-    quantity = quantity or 200
+    quantity = quantity or RC.BATCH
 
     local md        = GetMeticulousDisassembly()
     local rates     = md.active and TEMPER_RATES_MD or TEMPER_RATES_NO_MD
@@ -447,8 +455,8 @@ function RC.Evaluate(mat, quantity)
     local rawLink     = RC.RawLink(mat)
     local refinedLink = RC.RefinedLink(mat)
 
-    local pRaw,     rawSrc     = GetPrice(rawLink)
-    local pRefined, refinedSrc = GetPrice(refinedLink)
+    local pRaw,     rawSrc,     rawVolume     = GetPrice(rawLink)
+    local pRefined, refinedSrc, refinedVolume = GetPrice(refinedLink)
 
     if not pRaw then
         return nil, string.format("no price data for %s", rawLink)
@@ -458,74 +466,62 @@ function RC.Evaluate(mat, quantity)
     end
 
     local rows, missing = {}, {}
-    local temperGold = { low = 0, mid = 0, high = 0 }
+    local temperGold = 0
     for _, tier in ipairs(TIERS) do
         local link       = RC.TemperLink(craft, tier)
         local price, src = GetPrice(link)
         local count      = quantity * (rates[tier] / perRefine)
         if price then
-            for _, band in ipairs(BANDS) do
-                temperGold[band] = temperGold[band] + count * price[band]
-            end
+            temperGold = temperGold + count * price
         else
             missing[#missing + 1] = link
         end
         rows[#rows + 1] = {
             tier = tier, link = link, price = price, source = src, count = count,
-            gold = price and {
-                low = count * price.low, mid = count * price.mid, high = count * price.high,
-            } or nil,
+            gold = price and (count * price) or nil,
         }
     end
 
-    local refinedQty = quantity * RC.refinedPerRaw
+    local refinedQty   = quantity * RC.refinedPerRaw
+    local refinedGold  = refinedQty * pRefined
+    local sellRawGross = quantity * pRaw
+    local refineGross  = refinedGold + temperGold
 
-    -- Three parallel scenarios. Everything is gross until TaxOn, which is
-    -- applied once per option per band at the very end.
-    local sellRawGross, refineGross, refinedGold = {}, {}, {}
-    local rawNet, refineNet, net = {}, {}, {}
-    local rawFee, rawCut, refineFee, refineCut = {}, {}, {}, {}
-    local taxed = true
-
-    for _, band in ipairs(BANDS) do
-        refinedGold[band]  = refinedQty * pRefined[band]
-        sellRawGross[band] = quantity * pRaw[band]
-        refineGross[band]  = refinedGold[band] + temperGold[band]
-
-        local rf, rc, rn = TaxOn(sellRawGross[band])
-        local ff, fc, fn = TaxOn(refineGross[band])
-        if rn == nil or fn == nil then
-            taxed = false
-            rn, fn = sellRawGross[band], refineGross[band]
-        end
-        rawFee[band], rawCut[band], rawNet[band] = rf or 0, rc or 0, rn
-        refineFee[band], refineCut[band], refineNet[band] = ff or 0, fc or 0, fn
-        net[band] = fn - rn
+    -- Gross until here. Fees land once per option, at the end.
+    local rawFee, rawCut, rawNet          = TaxOn(sellRawGross)
+    local refineFee, refineCut, refineNet = TaxOn(refineGross)
+    local taxed = rawNet ~= nil and refineNet ~= nil
+    if not taxed then
+        rawNet, refineNet = sellRawGross, refineGross
     end
+
+    local net = refineNet - rawNet
 
     return {
         mat = mat, quantity = quantity, md = md, perRefine = perRefine,
         rawLink = rawLink, refinedLink = refinedLink,
-        pRaw = pRaw, rawSource = rawSrc,
-        pRefined = pRefined, refinedSource = refinedSrc,
+        pRaw = pRaw, rawSource = rawSrc, rawVolume = rawVolume or 0,
+        pRefined = pRefined, refinedSource = refinedSrc, refinedVolume = refinedVolume or 0,
         refinedQty = refinedQty, refinedGold = refinedGold,
         rows = rows, missing = missing, temperGold = temperGold,
         sellRawGross = sellRawGross, refineGross = refineGross,
         taxed = taxed,
-        rawFee = rawFee, rawCut = rawCut, rawNet = rawNet,
-        refineFee = refineFee, refineCut = refineCut, refineNet = refineNet,
+        rawFee = rawFee or 0, rawCut = rawCut or 0, rawNet = rawNet,
+        refineFee = refineFee or 0, refineCut = refineCut or 0, refineNet = refineNet,
         net = net,
-        -- Net scales linearly with quantity, so a per-batch figure is just a
-        -- rescale. Useful because "your whole stock" is not a comparable unit
-        -- between materials or between sessions.
-        netPerRaw = quantity > 0 and (net.mid / quantity) or 0,
+        -- Everything above is per RC.BATCH raw. Net scales linearly, so applying
+        -- it to a real inventory is a rescale -- done only in the stock line.
+        netPerRaw = quantity > 0 and (net / quantity) or 0,
     }
 end
 
--- Net gain/loss for a standard batch, from an already-evaluated result.
-function RC.NetPer(r, batch, band)
-    if r.quantity <= 0 then return 0 end
-    return r.net[band or "mid"] / r.quantity * batch
+-- How many of this raw material the player actually holds, across bag, bank and
+-- craft bag. Kept out of Evaluate so the table always reads per RC.BATCH and
+-- only the stock line depends on what you happen to be carrying.
+function RC.StockCount(mat)
+    if not GetItemLinkStacks then return 0 end
+    local backpack, bank, craftBag = GetItemLinkStacks(RC.RawLink(mat))
+    return (backpack or 0) + (bank or 0) + (craftBag or 0)
 end
 
 -- The ranking answers a buyer's question: spotting an ore at some price, is it
@@ -548,28 +544,41 @@ RC.RANK_SORTS = {
     { key = "net",       label = "Sort: net gain" },
 }
 
+-- Below this, a material is not really traded and a tempting margin on it is
+-- noise: a couple of stale listings, or one sale months ago. Volume is the
+-- lesser of the raw and refined sides, because a plan that involves buying one
+-- and selling the other needs both to have a market.
+RC.minVolume = 50
+
 -- Evaluates every material. Returns a list of entries, unsorted.
-function RC.RankAll(batch)
-    batch = batch or 200
-    local list = {}
+-- includeThin keeps materials that fail the volume filter.
+function RC.RankAll(batch, includeThin)
+    batch = batch or RC.BATCH
+    local list, filtered = {}, 0
     for _, mat in ipairs(MATERIALS) do
         local r = RC.Evaluate(mat, batch)
         if r then
-            local buyCost   = r.sellRawGross.mid          -- gross: what you pay
-            local revenue   = r.refineNet.mid             -- net of fees on the sale
-            local breakEven = batch > 0 and revenue / batch or 0
-            list[#list + 1] = {
-                mat       = mat,
-                result    = r,
-                rawPrice  = r.pRaw.mid,
-                breakEven = breakEven,
-                buyProfit = revenue - buyCost,
-                margin    = buyCost > 0 and (revenue - buyCost) / buyCost or 0,
-                net       = r.net.mid,
-            }
+            local volume = math.min(r.rawVolume, r.refinedVolume)
+            if includeThin or volume >= RC.minVolume then
+                local buyCost   = r.sellRawGross      -- gross: what you pay
+                local revenue   = r.refineNet         -- net of fees on the sale
+                local breakEven = batch > 0 and revenue / batch or 0
+                list[#list + 1] = {
+                    mat       = mat,
+                    result    = r,
+                    rawPrice  = r.pRaw,
+                    breakEven = breakEven,
+                    buyProfit = revenue - buyCost,
+                    margin    = buyCost > 0 and (revenue - buyCost) / buyCost or 0,
+                    net       = r.net,
+                    volume    = volume,
+                }
+            else
+                filtered = filtered + 1
+            end
         end
     end
-    return list
+    return list, filtered
 end
 
 function RC.SortRanking(list, sortKey)
@@ -604,46 +613,49 @@ function RC.Report(mat, quantity)
         RC.MaterialLabel(r.mat), r.mat.craft.label, Gold(r.quantity)))
     d("  " .. MD_COLOR[mdState] .. mdText .. "|r")
     d("|c888888" .. Row("Item", "Src", "Price", "Qty", "Value") .. "|r")
-    d(Row(ItemName(r.rawLink), r.rawSource, Gold(r.pRaw.mid),
-        Gold(r.quantity), Gold(r.sellRawGross.mid)))
+    d(Row(ItemName(r.rawLink), r.rawSource, Gold(r.pRaw),
+        Gold(r.quantity), Gold(r.sellRawGross)))
 
     d("|c888888  -- or refine into --|r")
-    d(Row(ItemName(r.refinedLink), r.refinedSource, Gold(r.pRefined.mid),
-        string.format("%.1f", r.refinedQty), Gold(r.refinedGold.mid)))
+    d(Row(ItemName(r.refinedLink), r.refinedSource, Gold(r.pRefined),
+        string.format("%.1f", r.refinedQty), Gold(r.refinedGold)))
 
     for _, row in ipairs(r.rows) do
         if row.price then
-            d(Row(ItemName(row.link), row.source, Gold(row.price.mid),
-                string.format("%.2f", row.count), Gold(row.gold.mid)))
+            d(Row(ItemName(row.link), row.source, Gold(row.price),
+                string.format("%.2f", row.count), Gold(row.gold)))
         else
             d(Row(ItemName(row.link), "--", "|cFF6666no data|r",
                 string.format("%.2f", row.count), "0"))
         end
     end
 
-    -- Summary spans the three price scenarios instead of one figure.
-    d("|c888888" .. Row("", "", "Low", "Expected", "High") .. "|r")
+    d("|c888888" .. Row("", "", "Gross", "Fees", "Net") .. "|r")
 
-    local function Band(label, t)
-        return string.format(FMT, label, "", Gold(t.low), Gold(t.mid), Gold(t.high))
+    local function Option(label, gross, fee, cut, net)
+        local deduct = (fee + cut > 0) and ("-" .. Gold(fee + cut)) or "--"
+        return string.format(FMT, label, "", Gold(gross), deduct, Gold(net))
     end
-    d(Band("Sell raw (gross)", r.sellRawGross))
-    d(Band("  after fees", r.rawNet))
-    d(Band("Refine (gross)", r.refineGross))
-    d(Band("  after fees", r.refineNet))
+    d(Option("Sell raw", r.sellRawGross, r.rawFee, r.rawCut, r.rawNet))
+    d(Option("Refine + sell", r.refineGross, r.refineFee, r.refineCut, r.refineNet))
 
     local function Signed(v)
         return (v >= 0 and "+" or "-") .. Gold(v >= 0 and v or -v) .. "g"
     end
-    d(string.format(FMT, "Net", "", Signed(r.net.low), Signed(r.net.mid), Signed(r.net.high)))
 
-    if r.net.mid >= 0 then
-        d(string.format("  |c00FF00=> REFINE, +%sg expected|r", Gold(r.net.mid)))
+    if r.net >= 0 then
+        d(string.format("  |c00FF00=> REFINE, %s per %d raw|r", Signed(r.net), r.quantity))
     else
-        d(string.format("  |cFF4444=> SELL RAW, refining loses %sg expected|r", Gold(-r.net.mid)))
+        d(string.format("  |cFF4444=> SELL RAW, refining loses %sg per %d raw|r",
+            Gold(-r.net), r.quantity))
     end
-    d(string.format("  |c888888per 200 raw: %s (low %s, high %s)|r",
-        Signed(RC.NetPer(r, 200)), Signed(RC.NetPer(r, 200, "low")), Signed(RC.NetPer(r, 200, "high"))))
+
+    -- The one place actual holdings are used; the table above is per RC.BATCH.
+    local stock = RC.StockCount(r.mat)
+    if stock > 0 then
+        d(string.format("  |c888888Your stock: %s raw => %s total|r",
+            Gold(stock), Signed(r.netPerRaw * stock)))
+    end
 
     local note
     if not RC.applyTax then
@@ -694,16 +706,13 @@ local function RegisterContextMenu()
         local mat = BY_RAW_ID[GetItemLinkItemId(itemLink)]
         if not mat then return end
 
-        -- Price the stack the player actually holds, across bag, bank and craft bag.
-        local backpack, bank, craftBag = GetItemLinkStacks(itemLink)
-        local quantity = (backpack or 0) + (bank or 0) + (craftBag or 0)
-        if quantity < 1 then quantity = 200 end
-
-        AddCustomMenuItem(string.format("Refining profit (%d)", quantity), function()
+        -- Always opens per RC.BATCH so materials stay comparable; the window's
+        -- stock line is where the amount you actually hold is applied.
+        AddCustomMenuItem("Refining profit", function()
             if RC.UI then
-                RC.UI:Show(mat, quantity)
+                RC.UI:Show(mat)
             else
-                RC.Report(mat, quantity)
+                RC.Report(mat)
             end
         end)
         ShowMenu()

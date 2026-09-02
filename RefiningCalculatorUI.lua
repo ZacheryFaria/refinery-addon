@@ -20,7 +20,7 @@ UI.sortKey = "net"    -- see RC.RANK_SORTS
 local WM = WINDOW_MANAGER
 
 local WIN_NAME = "RefiningCalculatorWindow"
-local WIDTH, PAD, ROW_H = 460, 12, 20
+local WIDTH, PAD, ROW_H = 500, 12, 20
 local HEADER_H = 58  -- two rows: dropdowns, then buttons
 
 -- Ranking lists every material; showing all 45 would make the window taller
@@ -28,12 +28,15 @@ local HEADER_H = 58  -- two rows: dropdowns, then buttons
 local RANK_LIMIT = 20
 
 -- width is the column box; align is where the text sits inside it.
+-- Widths total WIDTH - 2*PAD. The last column is only used by the ranking view;
+-- the detail view leaves it empty.
 local COLUMNS = {
     { key = "name",  width = 170, align = TEXT_ALIGN_LEFT  },
-    { key = "src",   width =  46, align = TEXT_ALIGN_LEFT  },
-    { key = "price", width =  70, align = TEXT_ALIGN_RIGHT },
+    { key = "src",   width =  40, align = TEXT_ALIGN_LEFT  },
+    { key = "price", width =  66, align = TEXT_ALIGN_RIGHT },
     { key = "qty",   width =  66, align = TEXT_ALIGN_RIGHT },
-    { key = "value", width =  84, align = TEXT_ALIGN_RIGHT },
+    { key = "value", width =  66, align = TEXT_ALIGN_RIGHT },
+    { key = "vol",   width =  68, align = TEXT_ALIGN_RIGHT },
 }
 
 local COLOR_DIM    = { 0.60, 0.60, 0.60, 1 }
@@ -229,11 +232,11 @@ function UI:Create()
         UI:Refresh()
     end)
 
-    self.modeButton = self:MakeButton(self.header, 0, 130, 28, function()
+    self.modeButton = self:MakeButton(self.header, 0, 120, 28, function()
         UI.mode = (UI.mode == "ranking") and "detail" or "ranking"
         UI:Refresh()
     end)
-    self.sortButton = self:MakeButton(self.header, 138, 150, 28, function()
+    self.sortButton = self:MakeButton(self.header, 128, 140, 28, function()
         -- Cycle through RC.RANK_SORTS rather than hardcoding the order here.
         local sorts = RC.RANK_SORTS
         local at = 1
@@ -243,7 +246,11 @@ function UI:Create()
         UI.sortKey = sorts[(at % #sorts) + 1].key
         UI:Refresh()
     end)
-    self.refreshButton = self:MakeButton(self.header, 296, 140, 28, function()
+    self.volumeButton = self:MakeButton(self.header, 274, 110, 28, function()
+        UI.includeThin = not UI.includeThin
+        UI:Refresh()
+    end)
+    self.refreshButton = self:MakeButton(self.header, 390, 86, 28, function()
         RC.ClearPriceCache()
         UI:Refresh()
     end)
@@ -290,19 +297,6 @@ function UI:SetRow(index, values, color, itemLink)
     end
     row.cells.name.itemLink = itemLink
     row.cells.name.onClick = nil
-
-    -- Item rows show the link itself rather than a plain name, so the game
-    -- renders it in exactly the colour it would have in chat. LINK_STYLE_DEFAULT
-    -- drops the brackets, which would otherwise eat column width.
-    --
-    -- The quality colour is also applied to the cell, which matters if the label
-    -- ever renders the link as plain text: the name still comes out the right
-    -- colour instead of flat grey.
-    if itemLink and not color then
-        row.cells.name:SetText(RC.DisplayLink(itemLink))
-        local quality = RC.QualityColor(itemLink)
-        if quality then row.cells.name:SetColor(unpack(quality)) end
-    end
     return row
 end
 
@@ -333,9 +327,9 @@ function UI:Render(r)
     self:SetRow(i, {
         name  = RC.ItemName(r.rawLink),
         src   = r.rawSource,
-        price = RC.FormatGold(r.pRaw.mid),
+        price = RC.FormatGold(r.pRaw),
         qty   = RC.FormatGold(r.quantity),
-        value = RC.FormatGold(r.sellRawGross.mid),
+        value = RC.FormatGold(r.sellRawGross),
     }, nil, r.rawLink)
 
     i = i + 1
@@ -345,9 +339,9 @@ function UI:Render(r)
     self:SetRow(i, {
         name  = RC.ItemName(r.refinedLink),
         src   = r.refinedSource,
-        price = RC.FormatGold(r.pRefined.mid),
+        price = RC.FormatGold(r.pRefined),
         qty   = string.format("%.1f", r.refinedQty),
-        value = RC.FormatGold(r.refinedGold.mid),
+        value = RC.FormatGold(r.refinedGold),
     }, nil, r.refinedLink)
 
     for _, tier in ipairs(r.rows) do
@@ -355,43 +349,46 @@ function UI:Render(r)
         self:SetRow(i, {
             name  = RC.ItemName(tier.link),
             src   = tier.price and tier.source or "--",
-            price = tier.price and RC.FormatGold(tier.price.mid) or "no data",
+            price = tier.price and RC.FormatGold(tier.price) or "no data",
             qty   = string.format("%.2f", tier.count),
-            value = tier.gold and RC.FormatGold(tier.gold.mid) or "0",
+            value = tier.gold and RC.FormatGold(tier.gold) or "0",
         -- nil colour when priced, so the name picks up its quality colour;
         -- an explicit warning colour only when the price is missing.
         }, tier.price and nil or COLOR_WARN, tier.link)
     end
 
-    -- Summary across the three price scenarios.
     i = i + 1
-    self:SetRow(i, { price = "Low", qty = "Expected", value = "High" }, COLOR_DIM)
+    self:SetRow(i, { price = "Gross", qty = "Fees", value = "Net" }, COLOR_DIM)
 
-    local function Band(label, t, color)
-        i = i + 1
-        self:SetRow(i, {
-            name  = label,
-            price = RC.FormatGold(t.low),
-            qty   = RC.FormatGold(t.mid),
-            value = RC.FormatGold(t.high),
-        }, color)
+    local function Fees(fee, cut)
+        if fee + cut > 0 then return "-" .. RC.FormatGold(fee + cut) end
+        return "--"
     end
 
-    Band("Sell raw (gross)", r.sellRawGross)
-    Band("  after fees", r.rawNet, COLOR_DIM)
-    Band("Refine (gross)", r.refineGross)
-    Band("  after fees", r.refineNet, COLOR_DIM)
+    i = i + 1
+    self:SetRow(i, {
+        name  = "Sell raw",
+        price = RC.FormatGold(r.sellRawGross),
+        qty   = Fees(r.rawFee, r.rawCut),
+        value = RC.FormatGold(r.rawNet),
+    })
+
+    i = i + 1
+    self:SetRow(i, {
+        name  = "Refine + sell",
+        price = RC.FormatGold(r.refineGross),
+        qty   = Fees(r.refineFee, r.refineCut),
+        value = RC.FormatGold(r.refineNet),
+    })
 
     local function Signed(v)
         return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v)
     end
     i = i + 1
     self:SetRow(i, {
-        name  = "Net",
-        price = Signed(r.net.low),
-        qty   = Signed(r.net.mid),
-        value = Signed(r.net.high),
-    }, r.net.mid >= 0 and COLOR_GOOD or COLOR_BAD)
+        name  = string.format("Net per %d raw", r.quantity),
+        value = Signed(r.net),
+    }, r.net >= 0 and COLOR_GOOD or COLOR_BAD)
 
     -- Hide any rows left over from a longer previous render.
     for j = i + 1, #self.rows do
@@ -401,24 +398,29 @@ function UI:Render(r)
     local tableHeight = (i + 1) * ROW_H
     self.tableArea:SetHeight(tableHeight)
 
-    if r.net.mid >= 0 then
-        self.verdict:SetText(string.format("=> REFINE, +%sg expected", RC.FormatGold(r.net.mid)))
+    if r.net >= 0 then
+        self.verdict:SetText(string.format("=> REFINE, +%sg expected", RC.FormatGold(r.net)))
         self.verdict:SetColor(unpack(COLOR_GOOD))
     else
         self.verdict:SetText(string.format("=> SELL RAW, refining loses %sg expected",
-            RC.FormatGold(-r.net.mid)))
+            RC.FormatGold(-r.net)))
         self.verdict:SetColor(unpack(COLOR_BAD))
     end
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
-    local function SignedG(v)
-        return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v) .. "g"
+    -- The only place your actual holdings enter the picture; everything above is
+    -- per RC.BATCH so materials stay comparable.
+    local stock = RC.StockCount(r.mat)
+    if stock > 0 then
+        local total = r.netPerRaw * stock
+        self.perBatch:SetText(string.format("Your stock: %s raw  =>  %s%sg total",
+            RC.FormatGold(stock), total >= 0 and "+" or "-",
+            RC.FormatGold(total >= 0 and total or -total)))
+        self.perBatch:SetColor(unpack(total >= 0 and COLOR_GOOD or COLOR_BAD))
+    else
+        self.perBatch:SetText("Your stock: none")
+        self.perBatch:SetColor(unpack(COLOR_DIM))
     end
-    self.perBatch:SetText(string.format("per 200 raw: %s   (low %s, high %s)",
-        SignedG(RC.NetPer(r, 200)),
-        SignedG(RC.NetPer(r, 200, "low")),
-        SignedG(RC.NetPer(r, 200, "high"))))
-    self.perBatch:SetColor(unpack(r.net.mid >= 0 and COLOR_GOOD or COLOR_BAD))
     self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
 
     local note
@@ -445,8 +447,9 @@ function UI:RenderRanking()
     self:Create()
     self:PopulateDropdowns()
 
-    local batch = 200
-    local list = RC.SortRanking(RC.RankAll(batch), self.sortKey)
+    local batch = RC.BATCH
+    local list, filtered = RC.RankAll(batch, self.includeThin)
+    RC.SortRanking(list, self.sortKey)
 
     self.title:SetText("Worth buying to refine?")
     local mdText, mdState = RC.DescribeMD(RC.GetMD())
@@ -459,6 +462,7 @@ function UI:RenderRanking()
     h.price:SetText("Market")
     h.qty:SetText("Pay up to")
     h.value:SetText("Margin")
+    h.vol:SetText("Volume")
 
     local i = 0
     for index, entry in ipairs(list) do
@@ -467,11 +471,21 @@ function UI:RenderRanking()
         -- The RAW item here, not the refined one: this is the thing you buy.
         local link = RC.RawLink(entry.mat)
         local row = self:SetRow(i, {
+            name  = RC.ItemName(link),
             src   = entry.mat.craft.short,
             price = RC.FormatGold(entry.rawPrice),
             qty   = RC.FormatGold(entry.breakEven),
             value = string.format("%+.0f%%", entry.margin * 100),
+            vol   = RC.FormatGold(entry.volume),
         }, nil, link)
+
+        -- Thin markets only appear when the filter is off; flag them so a
+        -- tempting margin on two stale listings is not mistaken for a find.
+        if entry.volume < RC.minVolume then
+            row.cells.vol:SetColor(unpack(COLOR_WARN))
+        else
+            row.cells.vol:SetColor(unpack(COLOR_DIM))
+        end
 
         -- Colour the margin cell only, so the name keeps its item colour.
         row.cells.value:SetColor(unpack(entry.margin >= 0 and COLOR_GOOD or COLOR_BAD))
@@ -492,12 +506,17 @@ function UI:RenderRanking()
     local tableHeight = (i + 1) * ROW_H
     self.tableArea:SetHeight(tableHeight)
 
-    self.verdict:SetText(string.format("Showing top %d of %d. Click a row for detail.",
-        math.min(RANK_LIMIT, #list), #list))
+    local shown = math.min(RANK_LIMIT, #list)
+    if filtered > 0 then
+        self.verdict:SetText(string.format("Top %d of %d traded. %d hidden as thin (<%d).",
+            shown, #list, filtered, RC.minVolume))
+    else
+        self.verdict:SetText(string.format("Top %d of %d. Click a row for detail.", shown, #list))
+    end
     self.verdict:SetColor(unpack(COLOR_TEXT))
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
-    self.perBatch:SetText("Pay up to = most you can pay per raw and still break even. Green beats market.")
+    self.perBatch:SetText("Pay up to = most per raw to break even. Volume = units listed or sold.")
     self.perBatch:SetColor(unpack(COLOR_DIM))
     self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
 
@@ -517,7 +536,7 @@ end
 -- added later should call this and nothing else.
 function UI:SetTarget(mat, quantity)
     self.mat = mat or self.mat
-    self.quantity = quantity or self.quantity or 200
+    self.quantity = quantity or self.quantity or RC.BATCH
     return self:Refresh()
 end
 
@@ -534,8 +553,13 @@ function UI:UpdateButtons()
         self.sortButton:SetText(label)
         self.sortButton:SetHidden(self.mode ~= "ranking")
     end
+    if self.volumeButton then
+        self.volumeButton:SetText(self.includeThin
+            and "Volume: all" or ("Volume: " .. RC.minVolume .. "+"))
+        self.volumeButton:SetHidden(self.mode ~= "ranking")
+    end
     if self.refreshButton then
-        self.refreshButton:SetText("Refresh prices")
+        self.refreshButton:SetText("Refresh")
     end
 end
 
