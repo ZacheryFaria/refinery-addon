@@ -48,27 +48,107 @@ RC.applyTax = true
 -- Material data
 --------------------------------------------------------------------------------
 
--- Tempers are per CRAFT, not per material -- Honing Stone is the same item
--- whether you refine Iron or Rubedite.
--- Item IDs cross-verified against ArkadiusTradeToolsCraftingInfo.lua and Dustman.lua.
-local CRAFT_TEMPERS = {
-    BLACKSMITHING = { green = 54170,  blue = 54171,  purple = 54172,  gold = 54173  },
-    CLOTHING      = { green = 54174,  blue = 54175,  purple = 54176,  gold = 54177  },
-    WOODWORKING   = { green = 54178,  blue = 54179,  purple = 54180,  gold = 54181  },
-    JEWELRY       = { green = 203631, blue = 203632, purple = 203633, gold = 203634 },
+-- Refining outcome is identical within a craft: the only thing that varies from
+-- one material to the next is which ore maps to which ingot. Tempers therefore
+-- hang off the craft, and a material is just a raw -> refined pair inside it.
+-- Honing Stone is the same item whether you refine Iron or Rubedite.
+--
+-- Temper IDs verified against ArkadiusTradeToolsCraftingInfo.lua.
+-- Material IDs generated from AwesomeGuildStore's ItemRequirementLevelRanges.lua
+-- (which names every one), cross-checked against Dustman and LootDrop.
+local CRAFTS = {
+    {
+        key = "BLACKSMITHING", label = "Blacksmithing",
+        tempers = { green = 54170, blue = 54171, purple = 54172, gold = 54173 },
+        materials = {
+            { tier =  1, raw = 808   , refined = 5413   },
+            { tier =  2, raw = 5820  , refined = 4487   },
+            { tier =  3, raw = 23103 , refined = 23107  },
+            { tier =  4, raw = 23104 , refined = 6000   },
+            { tier =  5, raw = 23105 , refined = 6001   },
+            { tier =  6, raw = 4482  , refined = 46127  },
+            { tier =  7, raw = 23133 , refined = 46128  },
+            { tier =  8, raw = 23134 , refined = 46129  },
+            { tier =  9, raw = 23135 , refined = 46130  },
+            { tier = 10, raw = 71198 , refined = 64489  },
+        },
+    },
+    {
+        key = "CLOTHING", label = "Clothing",
+        tempers = { green = 54174, blue = 54175, purple = 54176, gold = 54177 },
+        materials = {
+            { tier =  1, raw = 812   , refined = 811    },
+            { tier =  1, raw = 793   , refined = 794    },
+            { tier =  2, raw = 4464  , refined = 4463   },
+            { tier =  2, raw = 4448  , refined = 4447   },
+            { tier =  3, raw = 23129 , refined = 23125  },
+            { tier =  3, raw = 23095 , refined = 23099  },
+            { tier =  4, raw = 23130 , refined = 23126  },
+            { tier =  4, raw = 6020  , refined = 23100  },
+            { tier =  5, raw = 23131 , refined = 23127  },
+            { tier =  5, raw = 23097 , refined = 23101  },
+            { tier =  6, raw = 33217 , refined = 46131  },
+            { tier =  6, raw = 23142 , refined = 46135  },
+            { tier =  7, raw = 33218 , refined = 46132  },
+            { tier =  7, raw = 23143 , refined = 46136  },
+            { tier =  8, raw = 33219 , refined = 46133  },
+            { tier =  8, raw = 800   , refined = 46137  },
+            { tier =  9, raw = 33220 , refined = 46134  },
+            { tier =  9, raw = 4478  , refined = 46138  },
+            { tier = 10, raw = 71200 , refined = 64504  },
+            { tier = 10, raw = 71239 , refined = 64506  },
+        },
+    },
+    {
+        key = "WOODWORKING", label = "Woodworking",
+        tempers = { green = 54178, blue = 54179, purple = 54180, gold = 54181 },
+        materials = {
+            { tier =  1, raw = 802   , refined = 803    },
+            { tier =  2, raw = 521   , refined = 533    },
+            { tier =  3, raw = 23117 , refined = 23121  },
+            { tier =  4, raw = 23118 , refined = 23122  },
+            { tier =  5, raw = 23119 , refined = 23123  },
+            { tier =  6, raw = 818   , refined = 46139  },
+            { tier =  7, raw = 4439  , refined = 46140  },
+            { tier =  8, raw = 23137 , refined = 46141  },
+            { tier =  9, raw = 23138 , refined = 46142  },
+            { tier = 10, raw = 71199 , refined = 64502  },
+        },
+    },
+    {
+        key = "JEWELRY", label = "Jewelry",
+        tempers = { green = 203631, blue = 203632, purple = 203633, gold = 203634 },
+        materials = {
+            { tier = 1, raw = 135137, refined = 135138 },
+            { tier = 2, raw = 135139, refined = 135140 },
+            { tier = 3, raw = 135141, refined = 135142 },
+            { tier = 4, raw = 135143, refined = 135144 },
+            { tier = 5, raw = 135145, refined = 135146 },
+        },
+    },
 }
 
--- CP160 tier. raw/refined verified against the Dustman material whitelist.
-local MATERIALS = {
-    { key = "RUBEDITE",       label = "Rubedite",       craft = "BLACKSMITHING", raw = 71198,  refined = 64489  },
-    { key = "ANCESTOR_SILK",  label = "Ancestor Silk",  craft = "CLOTHING",      raw = 71239,  refined = 64504  },
-    { key = "RUBEDO_LEATHER", label = "Rubedo Leather", craft = "CLOTHING",      raw = 71200,  refined = 64506  },
-    { key = "RUBY_ASH",       label = "Ruby Ash",       craft = "WOODWORKING",   raw = 71199,  refined = 64502  },
-    { key = "PLATINUM",       label = "Platinum",       craft = "JEWELRY",       raw = 135145, refined = 135146 },
-}
-
+-- Flattened, each entry carrying a reference back to its craft so the tempers
+-- travel with it. Display names come from the game at runtime, so there are no
+-- hand-typed labels to drift or mistranslate.
+local MATERIALS = {}
 local BY_RAW_ID = {}
-for _, mat in ipairs(MATERIALS) do BY_RAW_ID[mat.raw] = mat end
+for _, craft in ipairs(CRAFTS) do
+    for _, mat in ipairs(craft.materials) do
+        mat.craft = craft
+        MATERIALS[#MATERIALS + 1] = mat
+        BY_RAW_ID[mat.raw] = mat
+    end
+end
+
+RC.CRAFTS = CRAFTS
+
+-- Opening on Iron would be a poor first impression; the top tier is the case
+-- people actually weigh up.
+RC.DEFAULT_MATERIAL = MATERIALS[1]
+for _, mat in ipairs(CRAFTS[1].materials) do
+    if mat.tier > RC.DEFAULT_MATERIAL.tier then RC.DEFAULT_MATERIAL = mat end
+end
 
 --------------------------------------------------------------------------------
 -- Item links
@@ -84,6 +164,14 @@ local function Link(itemId, subtype)
 end
 
 local TIERS = { "green", "blue", "purple", "gold" }
+
+-- The three price scenarios carried through every calculation.
+local BANDS = { "low", "mid", "high" }
+RC.BANDS = BANDS
+
+function RC.RawLink(mat)     return Link(mat.raw) end
+function RC.RefinedLink(mat) return Link(mat.refined) end
+function RC.TemperLink(craft, tier) return Link(craft.tempers[tier], SUBTYPE[tier]) end
 
 --------------------------------------------------------------------------------
 -- Meticulous Disassembly detection
@@ -178,28 +266,62 @@ function RC.SourceAvailable(entry)
     return probe ~= nil and probe() and true or false
 end
 
-local function GetPrice(itemLink)
-    if not (LibPrice and LibPrice.ItemLinkToPriceGold) then return nil, "nolib" end
+-- One source's low / mid / high, from the raw per-source data rather than
+-- ItemLinkToPriceGold. That matters because ItemLinkToPriceGold prefers TTC's
+-- SuggestedPrice, which is a deliberately conservative figure -- it was making
+-- every TTC number look like the bottom of the market.
+--
+-- TTC carries a real spread (Min / Avg / Max). MM and ATT report a single
+-- average, so for them low = mid = high and they simply do not widen the range.
+local function SourceRange(itemLink, key)
+    local data = LibPrice.ItemLinkToPriceData(itemLink, key)
+    local info = data and data[key]
+    if not info then return nil end
 
-    if RC.priceSource ~= "blend" then
-        local gold, source = LibPrice.ItemLinkToPriceGold(itemLink, RC.priceSource)
-        if gold and gold > 0 then return gold, source end
-        return nil, "nodata"
+    if key == "ttc" then
+        local mid = info.Avg or info.SuggestedPrice
+        if not mid or mid <= 0 then return nil end
+        return {
+            low  = info.Min or info.SuggestedPrice or mid,
+            mid  = mid,
+            high = info.Max or mid,
+        }
     end
 
-    -- Unweighted mean of whichever market sources have data. Equal weighting is
+    local avg = info.avgPrice or info.Avg or info.price
+    if not avg or avg <= 0 then return nil end
+    return { low = avg, mid = avg, high = avg }
+end
+
+-- Returns a {low, mid, high} table plus a source label, or nil.
+local function GetPrice(itemLink)
+    if not (LibPrice and LibPrice.ItemLinkToPriceData) then return nil, "nolib" end
+
+    local keys
+    if RC.priceSource == "blend" then
+        keys = RC.MARKET_SOURCES
+    else
+        keys = { RC.priceSource }
+    end
+
+    -- Unweighted mean across whichever sources have data. Equal weighting is
     -- deliberate: sale counts are not comparable across these addons.
-    local sum, count, used = 0, 0, {}
-    for _, key in ipairs(RC.MARKET_SOURCES) do
-        local gold = LibPrice.ItemLinkToPriceGold(itemLink, key)
-        if gold and gold > 0 then
-            sum = sum + gold
+    local low, mid, high, count, used = 0, 0, 0, 0, {}
+    for _, key in ipairs(keys) do
+        local r = SourceRange(itemLink, key)
+        if r then
+            low, mid, high = low + r.low, mid + r.mid, high + r.high
             count = count + 1
             used[#used + 1] = key
         end
     end
-    if count > 0 then return sum / count, table.concat(used, "+") end
-    return nil, "nodata"
+    if count == 0 then return nil, "nodata" end
+
+    return {
+        low  = low / count,
+        mid  = mid / count,
+        high = high / count,
+    }, table.concat(used, "+")
 end
 
 local function Gold(n)
@@ -211,6 +333,34 @@ local function ItemName(itemLink)
     local name = GetItemLinkName(itemLink)
     if not name or name == "" then return "?" end
     return zo_strformat(SI_TOOLTIP_ITEM_NAME, name)
+end
+
+-- Item quality colour, so a Dreugh Wax row reads gold and a Honing Stone green.
+-- ZO_ColorDef:New(GetItemQualityColor(q)) is ATT's proven call shape.
+function RC.QualityColor(itemLink)
+    local getQuality = GetItemLinkDisplayQuality or GetItemLinkQuality
+    if not (getQuality and GetItemQualityColor and ZO_ColorDef) then return nil end
+    local quality = getQuality(itemLink)
+    if not quality then return nil end
+    local color = ZO_ColorDef:New(GetItemQualityColor(quality))
+    if not (color and color.UnpackRGBA) then return nil end
+    local r, g, b, a = color:UnpackRGBA()
+    if not r then return nil end
+    return { r, g, b, a or 1 }
+end
+
+-- Names come from the game, so they are correct and localised without a table
+-- of hand-typed labels. Cached because the dropdown asks for all 45 at once.
+local labelCache = {}
+function RC.MaterialLabel(mat)
+    local cached = labelCache[mat.refined]
+    if cached then return cached end
+    local name = ItemName(RC.RefinedLink(mat))
+    if not name or name == "" or name == "?" then
+        name = string.format("%s tier %d", mat.craft.label, mat.tier)
+    end
+    labelCache[mat.refined] = name
+    return name
 end
 
 -- Shared with the window (RefiningCalculatorUI.lua).
@@ -247,10 +397,10 @@ function RC.Evaluate(mat, quantity)
     local md        = GetMeticulousDisassembly()
     local rates     = md.active and TEMPER_RATES_MD or TEMPER_RATES_NO_MD
     local perRefine = StackSize()
-    local tempers   = CRAFT_TEMPERS[mat.craft]
+    local craft     = mat.craft
 
-    local rawLink     = Link(mat.raw)
-    local refinedLink = Link(mat.refined)
+    local rawLink     = RC.RawLink(mat)
+    local refinedLink = RC.RefinedLink(mat)
 
     local pRaw,     rawSrc     = GetPrice(rawLink)
     local pRefined, refinedSrc = GetPrice(refinedLink)
@@ -263,34 +413,49 @@ function RC.Evaluate(mat, quantity)
     end
 
     local rows, missing = {}, {}
-    local temperGold = 0
+    local temperGold = { low = 0, mid = 0, high = 0 }
     for _, tier in ipairs(TIERS) do
-        local link       = Link(tempers[tier], SUBTYPE[tier])
+        local link       = RC.TemperLink(craft, tier)
         local price, src = GetPrice(link)
         local count      = quantity * (rates[tier] / perRefine)
         if price then
-            temperGold = temperGold + count * price
+            for _, band in ipairs(BANDS) do
+                temperGold[band] = temperGold[band] + count * price[band]
+            end
         else
             missing[#missing + 1] = link
         end
         rows[#rows + 1] = {
-            tier = tier, link = link, price = price, source = src,
-            count = count, gold = price and (count * price) or 0,
+            tier = tier, link = link, price = price, source = src, count = count,
+            gold = price and {
+                low = count * price.low, mid = count * price.mid, high = count * price.high,
+            } or nil,
         }
     end
 
-    -- Everything above is gross. Fees are applied once, at the end, per option.
-    local refinedQty     = quantity * RC.refinedPerRaw
-    local refinedGold    = refinedQty * pRefined
-    local sellRawGross   = quantity * pRaw
-    local refineGross    = refinedGold + temperGold
+    local refinedQty = quantity * RC.refinedPerRaw
 
-    local rawFee,    rawCut,    rawNet    = TaxOn(sellRawGross)
-    local refineFee, refineCut, refineNet = TaxOn(refineGross)
+    -- Three parallel scenarios. Everything is gross until TaxOn, which is
+    -- applied once per option per band at the very end.
+    local sellRawGross, refineGross, refinedGold = {}, {}, {}
+    local rawNet, refineNet, net = {}, {}, {}
+    local rawFee, rawCut, refineFee, refineCut = {}, {}, {}, {}
+    local taxed = true
 
-    local taxed = rawNet ~= nil and refineNet ~= nil
-    if not taxed then
-        rawNet, refineNet = sellRawGross, refineGross
+    for _, band in ipairs(BANDS) do
+        refinedGold[band]  = refinedQty * pRefined[band]
+        sellRawGross[band] = quantity * pRaw[band]
+        refineGross[band]  = refinedGold[band] + temperGold[band]
+
+        local rf, rc, rn = TaxOn(sellRawGross[band])
+        local ff, fc, fn = TaxOn(refineGross[band])
+        if rn == nil or fn == nil then
+            taxed = false
+            rn, fn = sellRawGross[band], refineGross[band]
+        end
+        rawFee[band], rawCut[band], rawNet[band] = rf or 0, rc or 0, rn
+        refineFee[band], refineCut[band], refineNet[band] = ff or 0, fc or 0, fn
+        net[band] = fn - rn
     end
 
     return {
@@ -299,29 +464,30 @@ function RC.Evaluate(mat, quantity)
         pRaw = pRaw, rawSource = rawSrc,
         pRefined = pRefined, refinedSource = refinedSrc,
         refinedQty = refinedQty, refinedGold = refinedGold,
-        rows = rows, missing = missing,
+        rows = rows, missing = missing, temperGold = temperGold,
         sellRawGross = sellRawGross, refineGross = refineGross,
         taxed = taxed,
-        rawFee = rawFee or 0, rawCut = rawCut or 0, rawNet = rawNet,
-        refineFee = refineFee or 0, refineCut = refineCut or 0, refineNet = refineNet,
-        net = refineNet - rawNet,
-        -- Net scales linearly with quantity, so per-batch figures are just a
+        rawFee = rawFee, rawCut = rawCut, rawNet = rawNet,
+        refineFee = refineFee, refineCut = refineCut, refineNet = refineNet,
+        net = net,
+        -- Net scales linearly with quantity, so a per-batch figure is just a
         -- rescale. Useful because "your whole stock" is not a comparable unit
         -- between materials or between sessions.
-        netPerRaw = quantity > 0 and (refineNet - rawNet) / quantity or 0,
+        netPerRaw = quantity > 0 and (net.mid / quantity) or 0,
     }
 end
 
 -- Net gain/loss for a standard batch, from an already-evaluated result.
-function RC.NetPer(r, batch)
-    return r.netPerRaw * batch
+function RC.NetPer(r, batch, band)
+    if r.quantity <= 0 then return 0 end
+    return r.net[band or "mid"] / r.quantity * batch
 end
 
 function RC.Report(mat, quantity)
     local r, err = RC.Evaluate(mat, quantity)
     if not r then
         d(PREFIX .. "|cFF6666" .. err .. "|r")
-        if not (LibPrice and LibPrice.ItemLinkToPriceGold) then
+        if not (LibPrice and LibPrice.ItemLinkToPriceData) then
             d(PREFIX .. "|cFF6666LibPrice is not loaded -- no price source available.|r")
         end
         return
@@ -335,45 +501,50 @@ function RC.Report(mat, quantity)
     end
 
     local mdText, mdState = RC.DescribeMD(r.md)
-    d(string.format("|cFFFF00=== %s -- %s raw ===|r", r.mat.label, Gold(r.quantity)))
+    d(string.format("|cFFFF00=== %s (%s) -- %s raw ===|r",
+        RC.MaterialLabel(r.mat), r.mat.craft.label, Gold(r.quantity)))
     d("  " .. MD_COLOR[mdState] .. mdText .. "|r")
     d("|c888888" .. Row("Item", "Src", "Price", "Qty", "Value") .. "|r")
-    d(Row(ItemName(r.rawLink), r.rawSource, Gold(r.pRaw), Gold(r.quantity), Gold(r.sellRawGross)))
+    d(Row(ItemName(r.rawLink), r.rawSource, Gold(r.pRaw.mid),
+        Gold(r.quantity), Gold(r.sellRawGross.mid)))
 
     d("|c888888  -- or refine into --|r")
-    d(Row(ItemName(r.refinedLink), r.refinedSource, Gold(r.pRefined),
-        string.format("%.1f", r.refinedQty), Gold(r.refinedGold)))
+    d(Row(ItemName(r.refinedLink), r.refinedSource, Gold(r.pRefined.mid),
+        string.format("%.1f", r.refinedQty), Gold(r.refinedGold.mid)))
 
     for _, row in ipairs(r.rows) do
         if row.price then
-            d(Row(ItemName(row.link), row.source, Gold(row.price),
-                string.format("%.2f", row.count), Gold(row.gold)))
+            d(Row(ItemName(row.link), row.source, Gold(row.price.mid),
+                string.format("%.2f", row.count), Gold(row.gold.mid)))
         else
             d(Row(ItemName(row.link), "--", "|cFF6666no data|r",
                 string.format("%.2f", row.count), "0"))
         end
     end
 
-    d("|c888888" .. Row("", "", "Gross", "Fees", "Net") .. "|r")
+    -- Summary spans the three price scenarios instead of one figure.
+    d("|c888888" .. Row("", "", "Low", "Expected", "High") .. "|r")
 
-    local function Option(label, gross, fee, cut, net)
-        local deduct = (fee + cut > 0) and ("-" .. Gold(fee + cut)) or "--"
-        return string.format(FMT, label, "", Gold(gross), deduct, Gold(net))
+    local function Band(label, t)
+        return string.format(FMT, label, "", Gold(t.low), Gold(t.mid), Gold(t.high))
     end
-    d(Option("Sell raw", r.sellRawGross, r.rawFee, r.rawCut, r.rawNet))
-    d(Option("Refine + sell", r.refineGross, r.refineFee, r.refineCut, r.refineNet))
+    d(Band("Sell raw (gross)", r.sellRawGross))
+    d(Band("  after fees", r.rawNet))
+    d(Band("Refine (gross)", r.refineGross))
+    d(Band("  after fees", r.refineNet))
 
     local function Signed(v)
         return (v >= 0 and "+" or "-") .. Gold(v >= 0 and v or -v) .. "g"
     end
+    d(string.format(FMT, "Net", "", Signed(r.net.low), Signed(r.net.mid), Signed(r.net.high)))
 
-    if r.net >= 0 then
-        d(string.format("  |c00FF00=> REFINE, +%sg|r", Gold(r.net)))
+    if r.net.mid >= 0 then
+        d(string.format("  |c00FF00=> REFINE, +%sg expected|r", Gold(r.net.mid)))
     else
-        d(string.format("  |cFF4444=> SELL RAW, refining loses %sg|r", Gold(-r.net)))
+        d(string.format("  |cFF4444=> SELL RAW, refining loses %sg expected|r", Gold(-r.net.mid)))
     end
-    d(string.format("  |c888888per 100 raw: %s   per 200 raw: %s|r",
-        Signed(RC.NetPer(r, 100)), Signed(RC.NetPer(r, 200))))
+    d(string.format("  |c888888per 200 raw: %s (low %s, high %s)|r",
+        Signed(RC.NetPer(r, 200)), Signed(RC.NetPer(r, 200, "low")), Signed(RC.NetPer(r, 200, "high"))))
 
     local note
     if not RC.applyTax then
@@ -447,10 +618,42 @@ end
 --------------------------------------------------------------------------------
 
 -- Chat sweep across every material -- the window shows one at a time.
+-- Sweeping all 45 materials would be several hundred chat lines, so the default
+-- is the top tier of each craft. Name a craft to sweep every tier of that one:
+--   /refinetest 200 clothing
 local function OnSlashTest(args)
-    local quantity = tonumber(args and args:match("(%d+)")) or 200
-    d(PREFIX .. string.format("Evaluating all CP160 materials at %d raw each...", quantity))
-    for _, mat in ipairs(MATERIALS) do
+    args = args or ""
+    local quantity = tonumber(args:match("(%d+)")) or 200
+    local want = args:gsub("%d+", ""):gsub("^%s*(.-)%s*$", "%1"):lower()
+
+    local list, what = {}, ""
+    if want ~= "" then
+        for _, craft in ipairs(CRAFTS) do
+            if craft.label:lower():find(want, 1, true) then
+                list, what = craft.materials, craft.label .. ", all tiers"
+                break
+            end
+        end
+        if #list == 0 then
+            d(PREFIX .. "|cFF6666no craft matching '" .. want .. "'|r")
+            return
+        end
+    else
+        for _, craft in ipairs(CRAFTS) do
+            local top
+            for _, mat in ipairs(craft.materials) do
+                if not top or mat.tier > top.tier then top = mat end
+            end
+            -- Clothing's top tier is two materials (cloth and leather).
+            for _, mat in ipairs(craft.materials) do
+                if mat.tier == top.tier then list[#list + 1] = mat end
+            end
+        end
+        what = "top tier of each craft"
+    end
+
+    d(PREFIX .. string.format("Evaluating %s at %d raw each...", what, quantity))
+    for _, mat in ipairs(list) do
         RC.Report(mat, quantity)
     end
 end
@@ -469,7 +672,7 @@ local function OnSlashCalc(args)
     local mat
     if name ~= "" then
         for _, m in ipairs(MATERIALS) do
-            if m.label:lower():find(name, 1, true) then mat = m break end
+            if RC.MaterialLabel(m):lower():find(name, 1, true) then mat = m break end
         end
         if not mat then
             d(PREFIX .. "|cFF6666no material matching '" .. name .. "'|r")
@@ -477,7 +680,7 @@ local function OnSlashCalc(args)
         end
     end
 
-    RC.UI:Toggle(mat or RC.UI.mat or MATERIALS[1], quantity)
+    RC.UI:Toggle(mat or RC.UI.mat or RC.DEFAULT_MATERIAL, quantity)
 end
 
 --------------------------------------------------------------------------------
@@ -493,7 +696,7 @@ local function OnPlayerActivated()
     if not menuRegistered then
         d(PREFIX .. "|cFF6666LibCustomMenu missing -- context menu disabled.|r")
     end
-    if not (LibPrice and LibPrice.ItemLinkToPriceGold) then
+    if not (LibPrice and LibPrice.ItemLinkToPriceData) then
         d(PREFIX .. "|cFF6666LibPrice not loaded -- no prices available. Enable LibPrice and tick Allow out of date add-ons.|r")
     end
 end

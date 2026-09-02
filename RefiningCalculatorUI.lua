@@ -117,12 +117,25 @@ function UI:PopulateDropdowns()
     if self.materialDropdown then
         local dd = self.materialDropdown
         dd.combo:ClearItems()
-        for _, mat in ipairs(RC.MATERIALS) do
-            local entry = dd.combo:CreateItemEntry(mat.label, dd.onSelect)
-            entry.mat = mat
-            dd.combo:AddItem(entry)
+        local selected
+        for _, craft in ipairs(RC.CRAFTS) do
+            -- ZO_ComboBox has no real group headings, so a heading is an entry
+            -- whose callback just restores the actual selection.
+            local heading = dd.combo:CreateItemEntry("-- " .. craft.label .. " --", function()
+                if UI.updatingDropdowns then return end
+                UI:PopulateDropdowns()
+            end)
+            dd.combo:AddItem(heading)
+
+            for _, mat in ipairs(craft.materials) do
+                local label = "    " .. RC.MaterialLabel(mat)
+                local entry = dd.combo:CreateItemEntry(label, dd.onSelect)
+                entry.mat = mat
+                dd.combo:AddItem(entry)
+                if mat == self.mat then selected = label end
+            end
         end
-        if self.mat then dd.combo:SetSelectedItem(self.mat.label) end
+        if selected then dd.combo:SetSelectedItem(selected) end
     end
 
     if self.sourceDropdown then
@@ -230,6 +243,14 @@ function UI:SetRow(index, values, color, itemLink)
         cell:SetColor(unpack(color or COLOR_TEXT))
     end
     row.cells.name.itemLink = itemLink
+
+    -- Item names take their in-game quality colour, so Dreugh Wax reads gold and
+    -- Honing Stone green. Only when the row has no explicit colour override, so
+    -- a "no data" warning still shows as a warning.
+    if itemLink and not color then
+        local quality = RC.QualityColor(itemLink)
+        if quality then row.cells.name:SetColor(unpack(quality)) end
+    end
     return row
 end
 
@@ -241,7 +262,7 @@ function UI:Render(r)
     self:Create()
     self:PopulateDropdowns()
 
-    self.title:SetText(string.format("%s -- %s raw", r.mat.label, RC.FormatGold(r.quantity)))
+    self.title:SetText(string.format("%s -- %s raw", RC.MaterialLabel(r.mat), RC.FormatGold(r.quantity)))
     local mdText, mdState = RC.DescribeMD(r.md)
     self.subtitle:SetText(mdText)
     self.subtitle:SetColor(unpack(mdState == "active" and COLOR_GOOD or COLOR_WARN))
@@ -255,13 +276,14 @@ function UI:Render(r)
 
     local i = 0
 
+    -- Item rows show the expected (mid) price; the spread is summarised below.
     i = i + 1
     self:SetRow(i, {
         name  = RC.ItemName(r.rawLink),
         src   = r.rawSource,
-        price = RC.FormatGold(r.pRaw),
+        price = RC.FormatGold(r.pRaw.mid),
         qty   = RC.FormatGold(r.quantity),
-        value = RC.FormatGold(r.sellRawGross),
+        value = RC.FormatGold(r.sellRawGross.mid),
     }, nil, r.rawLink)
 
     i = i + 1
@@ -271,9 +293,9 @@ function UI:Render(r)
     self:SetRow(i, {
         name  = RC.ItemName(r.refinedLink),
         src   = r.refinedSource,
-        price = RC.FormatGold(r.pRefined),
+        price = RC.FormatGold(r.pRefined.mid),
         qty   = string.format("%.1f", r.refinedQty),
-        value = RC.FormatGold(r.refinedGold),
+        value = RC.FormatGold(r.refinedGold.mid),
     }, nil, r.refinedLink)
 
     for _, tier in ipairs(r.rows) do
@@ -281,35 +303,43 @@ function UI:Render(r)
         self:SetRow(i, {
             name  = RC.ItemName(tier.link),
             src   = tier.price and tier.source or "--",
-            price = tier.price and RC.FormatGold(tier.price) or "no data",
+            price = tier.price and RC.FormatGold(tier.price.mid) or "no data",
             qty   = string.format("%.2f", tier.count),
-            value = tier.price and RC.FormatGold(tier.gold) or "0",
-        }, tier.price and COLOR_TEXT or COLOR_WARN, tier.link)
+            value = tier.gold and RC.FormatGold(tier.gold.mid) or "0",
+        -- nil colour when priced, so the name picks up its quality colour;
+        -- an explicit warning colour only when the price is missing.
+        }, tier.price and nil or COLOR_WARN, tier.link)
     end
 
+    -- Summary across the three price scenarios.
     i = i + 1
-    self:SetRow(i, { price = "Gross", qty = "Fees", value = "Net" }, COLOR_DIM)
+    self:SetRow(i, { price = "Low", qty = "Expected", value = "High" }, COLOR_DIM)
 
-    local function Deduct(fee, cut)
-        if fee + cut > 0 then return "-" .. RC.FormatGold(fee + cut) end
-        return "--"
+    local function Band(label, t, color)
+        i = i + 1
+        self:SetRow(i, {
+            name  = label,
+            price = RC.FormatGold(t.low),
+            qty   = RC.FormatGold(t.mid),
+            value = RC.FormatGold(t.high),
+        }, color)
     end
 
-    i = i + 1
-    self:SetRow(i, {
-        name  = "Sell raw",
-        price = RC.FormatGold(r.sellRawGross),
-        qty   = Deduct(r.rawFee, r.rawCut),
-        value = RC.FormatGold(r.rawNet),
-    })
+    Band("Sell raw (gross)", r.sellRawGross)
+    Band("  after fees", r.rawNet, COLOR_DIM)
+    Band("Refine (gross)", r.refineGross)
+    Band("  after fees", r.refineNet, COLOR_DIM)
 
+    local function Signed(v)
+        return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v)
+    end
     i = i + 1
     self:SetRow(i, {
-        name  = "Refine + sell",
-        price = RC.FormatGold(r.refineGross),
-        qty   = Deduct(r.refineFee, r.refineCut),
-        value = RC.FormatGold(r.refineNet),
-    })
+        name  = "Net",
+        price = Signed(r.net.low),
+        qty   = Signed(r.net.mid),
+        value = Signed(r.net.high),
+    }, r.net.mid >= 0 and COLOR_GOOD or COLOR_BAD)
 
     -- Hide any rows left over from a longer previous render.
     for j = i + 1, #self.rows do
@@ -319,21 +349,24 @@ function UI:Render(r)
     local tableHeight = (i + 1) * ROW_H
     self.tableArea:SetHeight(tableHeight)
 
-    if r.net >= 0 then
-        self.verdict:SetText(string.format("=> REFINE, +%sg", RC.FormatGold(r.net)))
+    if r.net.mid >= 0 then
+        self.verdict:SetText(string.format("=> REFINE, +%sg expected", RC.FormatGold(r.net.mid)))
         self.verdict:SetColor(unpack(COLOR_GOOD))
     else
-        self.verdict:SetText(string.format("=> SELL RAW, refining loses %sg", RC.FormatGold(-r.net)))
+        self.verdict:SetText(string.format("=> SELL RAW, refining loses %sg expected",
+            RC.FormatGold(-r.net.mid)))
         self.verdict:SetColor(unpack(COLOR_BAD))
     end
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
-    local function Signed(v)
+    local function SignedG(v)
         return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v) .. "g"
     end
-    self.perBatch:SetText(string.format("per 100 raw: %s      per 200 raw: %s",
-        Signed(RC.NetPer(r, 100)), Signed(RC.NetPer(r, 200))))
-    self.perBatch:SetColor(unpack(r.net >= 0 and COLOR_GOOD or COLOR_BAD))
+    self.perBatch:SetText(string.format("per 200 raw: %s   (low %s, high %s)",
+        SignedG(RC.NetPer(r, 200)),
+        SignedG(RC.NetPer(r, 200, "low")),
+        SignedG(RC.NetPer(r, 200, "high"))))
+    self.perBatch:SetColor(unpack(r.net.mid >= 0 and COLOR_GOOD or COLOR_BAD))
     self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
 
     local note
@@ -372,7 +405,7 @@ function UI:Refresh()
         -- Keep the dropdowns live: picking a source with no data must not trap
         -- the user with no way to pick a different one.
         self:PopulateDropdowns()
-        self.title:SetText(self.mat.label)
+        self.title:SetText(RC.MaterialLabel(self.mat))
         self.subtitle:SetText(err or "no data")
         self.subtitle:SetColor(unpack(COLOR_BAD))
         for _, row in ipairs(self.rows) do row.control:SetHidden(true) end
