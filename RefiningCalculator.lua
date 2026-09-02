@@ -302,13 +302,16 @@ end
 -- literally reads "TODO: Count" -- so ATT is asked directly.
 RC.volumeDays = 30
 
+-- Counted as listings/sales rather than units on purpose: EntryCount is what
+-- TTC shows in its own tooltip, so the column can be checked by hovering a row.
+-- AmountCount (units across those listings) would be a bigger, less comparable
+-- number and would not match anything the player can see.
 local function SourceVolume(itemLink, key)
     if key == "ttc" then
         local data = LibPrice.ItemLinkToPriceData(itemLink, "ttc")
         local info = data and data.ttc
         if not info then return 0 end
-        -- AmountCount is units listed; EntryCount is number of listings.
-        return info.AmountCount or info.EntryCount or 0
+        return info.EntryCount or 0
     end
 
     if key == "att" then
@@ -320,17 +323,17 @@ local function SourceVolume(itemLink, key)
             return sales:GetItemSalesInformation(itemLink, since)
         end)
         if not ok or not info or not info[itemLink] then return 0 end
-        local qty = 0
-        for _, sale in pairs(info[itemLink]) do
-            qty = qty + (sale.quantity or 0)
+        local count = 0
+        for _ in pairs(info[itemLink]) do
+            count = count + 1
         end
-        return qty
+        return count
     end
 
     if key == "mm" then
         local data = LibPrice.ItemLinkToPriceData(itemLink, "mm")
         local info = data and data.mm
-        return (info and (info.numItems or info.numSales)) or 0
+        return (info and info.numSales) or 0
     end
 
     return 0
@@ -550,16 +553,28 @@ RC.RANK_SORTS = {
 -- and selling the other needs both to have a market.
 RC.minVolume = 50
 
--- Evaluates every material. Returns a list of entries, unsorted.
--- includeThin keeps materials that fail the volume filter.
-function RC.RankAll(batch, includeThin)
+-- Selectable thresholds, cycled by the window's volume button. 0 means show
+-- everything, including materials with no market at all.
+RC.VOLUME_STEPS = { 0, 10, 25, 50, 100, 250 }
+
+function RC.NextVolumeStep(current)
+    local steps = RC.VOLUME_STEPS
+    for index, v in ipairs(steps) do
+        if v == current then return steps[(index % #steps) + 1] end
+    end
+    return steps[1]
+end
+
+-- Evaluates every material. Returns a list of entries, unsorted, plus how many
+-- were held back by the volume threshold. RC.minVolume of 0 keeps everything.
+function RC.RankAll(batch)
     batch = batch or RC.BATCH
     local list, filtered = {}, 0
     for _, mat in ipairs(MATERIALS) do
         local r = RC.Evaluate(mat, batch)
         if r then
             local volume = math.min(r.rawVolume, r.refinedVolume)
-            if includeThin or volume >= RC.minVolume then
+            if volume >= RC.minVolume then
                 local buyCost   = r.sellRawGross      -- gross: what you pay
                 local revenue   = r.refineNet         -- net of fees on the sale
                 local breakEven = batch > 0 and revenue / batch or 0

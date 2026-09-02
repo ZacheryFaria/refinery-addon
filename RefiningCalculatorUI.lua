@@ -16,6 +16,7 @@ RC.UI = UI
 
 UI.mode = "detail"    -- "detail" | "ranking"
 UI.sortKey = "net"    -- see RC.RANK_SORTS
+UI.page = 1           -- ranking page, 1-based
 
 local WM = WINDOW_MANAGER
 
@@ -124,12 +125,15 @@ function UI:MakeDropdown(parent, x, width, onSelect)
     return { container = container, combo = combo, onSelect = onSelect }
 end
 
-function UI:MakeButton(parent, x, width, height, onClick)
+-- y defaults to 30, the header's second row; the paging buttons pass 0.
+-- Control names must be unique, so they include the parent's name.
+function UI:MakeButton(parent, x, width, height, onClick, y)
     local button = WM:CreateControlFromVirtual(
-        WIN_NAME .. "Button" .. tostring(x), parent, "ZO_DefaultButton")
+        WIN_NAME .. "Button" .. tostring(x) .. "_" .. tostring(y or 30),
+        parent, "ZO_DefaultButton")
     if not button then return nil end
     button:SetDimensions(width, height)
-    button:SetAnchor(TOPLEFT, parent, TOPLEFT, x, 30)
+    button:SetAnchor(TOPLEFT, parent, TOPLEFT, x, y or 30)
     button:SetHandler("OnClicked", onClick)
     return button
 end
@@ -247,7 +251,8 @@ function UI:Create()
         UI:Refresh()
     end)
     self.volumeButton = self:MakeButton(self.header, 274, 110, 28, function()
-        UI.includeThin = not UI.includeThin
+        RC.minVolume = RC.NextVolumeStep(RC.minVolume)
+        UI.page = 1
         UI:Refresh()
     end)
     self.refreshButton = self:MakeButton(self.header, 390, 86, 28, function()
@@ -272,6 +277,17 @@ function UI:Create()
     -- Reserved for high/low/Meticulous scenario toggles later.
     self.footer = WM:CreateControl(nil, win, CT_CONTROL)
     self.footer:SetDimensions(WIDTH - PAD * 2, 0)
+
+    -- Paging lives below the table, where the list it moves through is.
+    self.prevButton = self:MakeButton(self.footer, 0, 80, 26, function()
+        UI:SetPage(UI.page - 1)
+    end, 0)
+    self.pageLabel = MakeLabel(self.footer, "ZoFontGameSmall", TEXT_ALIGN_CENTER, COLOR_DIM)
+    self.pageLabel:SetDimensions(140, 26)
+    self.pageLabel:SetAnchor(TOPLEFT, self.footer, TOPLEFT, 88, 4)
+    self.nextButton = self:MakeButton(self.footer, 232, 80, 26, function()
+        UI:SetPage(UI.page + 1)
+    end, 0)
 
     return win
 end
@@ -313,12 +329,16 @@ function UI:Render(r)
     self.subtitle:SetText(mdText)
     self.subtitle:SetColor(unpack(mdState == "active" and COLOR_GOOD or COLOR_WARN))
 
+    -- "Qty /200" and "Value" spell out that the value column is an extended
+    -- total: expected count over 200 raw multiplied by the unit price. Price is
+    -- the figure to check against a TTC or ATT tooltip; Value is derived from it.
     local h = self.headerRow.cells
     h.name:SetText("Item")
     h.src:SetText("Src")
-    h.price:SetText("Price")
-    h.qty:SetText("Qty")
+    h.price:SetText("Price ea")
+    h.qty:SetText("Qty /200")
     h.value:SetText("Value")
+    h.vol:SetText("")
 
     local i = 0
 
@@ -352,9 +372,11 @@ function UI:Render(r)
             price = tier.price and RC.FormatGold(tier.price) or "no data",
             qty   = string.format("%.2f", tier.count),
             value = tier.gold and RC.FormatGold(tier.gold) or "0",
-        -- nil colour when priced, so the name picks up its quality colour;
-        -- an explicit warning colour only when the price is missing.
-        }, tier.price and nil or COLOR_WARN, tier.link)
+        -- Plain text when priced. Written out rather than as
+        -- "tier.price and nil or COLOR_WARN", which is always COLOR_WARN in Lua:
+        -- "x and nil" is falsy, so the or-branch always wins. That is why every
+        -- temper row was orange.
+        }, (not tier.price) and COLOR_WARN or nil, tier.link)
     end
 
     i = i + 1
@@ -434,7 +456,9 @@ function UI:Render(r)
     self.note:SetText(string.format("%s  Refined yield %.2f/raw.", note, RC.refinedPerRaw))
     self.note:SetAnchor(TOPLEFT, self.perBatch, BOTTOMLEFT, 0, 4)
 
+    self:UpdatePaging()
     self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
+    self.footer:SetHeight(0)
     -- title + subtitle, dropdown row, table, then verdict + per-batch + note.
     self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74)
 end
@@ -448,8 +472,15 @@ function UI:RenderRanking()
     self:PopulateDropdowns()
 
     local batch = RC.BATCH
-    local list, filtered = RC.RankAll(batch, self.includeThin)
+    local list, filtered = RC.RankAll(batch)
     RC.SortRanking(list, self.sortKey)
+
+    -- Clamp after sorting: the page count changes when the filter or the source
+    -- changes, and page 4 of a now-2-page list must not render empty.
+    local pages = math.max(1, math.ceil(#list / RANK_LIMIT))
+    if self.page > pages then self.page = pages end
+    if self.page < 1 then self.page = 1 end
+    local first = (self.page - 1) * RANK_LIMIT
 
     self.title:SetText("Worth buying to refine?")
     local mdText, mdState = RC.DescribeMD(RC.GetMD())
@@ -462,11 +493,12 @@ function UI:RenderRanking()
     h.price:SetText("Market")
     h.qty:SetText("Pay up to")
     h.value:SetText("Margin")
-    h.vol:SetText("Volume")
+    h.vol:SetText("Listings")
 
     local i = 0
-    for index, entry in ipairs(list) do
-        if index > RANK_LIMIT then break end
+    for offset = 1, RANK_LIMIT do
+        local entry = list[first + offset]
+        if not entry then break end
         i = i + 1
         -- The RAW item here, not the refined one: this is the thing you buy.
         local link = RC.RawLink(entry.mat)
@@ -506,26 +538,56 @@ function UI:RenderRanking()
     local tableHeight = (i + 1) * ROW_H
     self.tableArea:SetHeight(tableHeight)
 
-    local shown = math.min(RANK_LIMIT, #list)
     if filtered > 0 then
-        self.verdict:SetText(string.format("Top %d of %d traded. %d hidden as thin (<%d).",
-            shown, #list, filtered, RC.minVolume))
+        self.verdict:SetText(string.format("%d materials traded, %d hidden below %d listings.",
+            #list, filtered, RC.minVolume))
     else
-        self.verdict:SetText(string.format("Top %d of %d. Click a row for detail.", shown, #list))
+        self.verdict:SetText(string.format("%d materials. Click a row for detail.", #list))
     end
     self.verdict:SetColor(unpack(COLOR_TEXT))
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
-    self.perBatch:SetText("Pay up to = most per raw to break even. Volume = units listed or sold.")
+    self.perBatch:SetText("Pay up to = most per raw to break even, after fees.")
     self.perBatch:SetColor(unpack(COLOR_DIM))
+
+    self.pages = pages
     self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
 
     self.note:SetText(string.format("Refined yield %.2f/raw. Prices cached -- use Refresh for fresh data.",
         RC.refinedPerRaw))
     self.note:SetAnchor(TOPLEFT, self.perBatch, BOTTOMLEFT, 0, 4)
 
+    self:UpdatePaging()
     self.footer:SetAnchor(TOPLEFT, self.note, BOTTOMLEFT, 0, 6)
-    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74)
+    self.footer:SetHeight(30)
+    self.window:SetHeight(PAD * 2 + 44 + HEADER_H + 6 + tableHeight + 74 + 30)
+end
+
+-- Paging controls only mean anything in the ranking view, and only when there is
+-- more than one page to move between.
+function UI:UpdatePaging()
+    local pages = self.pages or 1
+    local show = (self.mode == "ranking") and pages > 1
+
+    if self.pageLabel then
+        self.pageLabel:SetText(string.format("Page %d of %d", self.page, pages))
+        self.pageLabel:SetHidden(not show)
+    end
+    if self.prevButton then
+        self.prevButton:SetText("< Prev")
+        self.prevButton:SetHidden(not show)
+        self.prevButton:SetEnabled(self.page > 1)
+    end
+    if self.nextButton then
+        self.nextButton:SetText("Next >")
+        self.nextButton:SetHidden(not show)
+        self.nextButton:SetEnabled(self.page < pages)
+    end
+end
+
+function UI:SetPage(page)
+    self.page = math.max(1, page)
+    self:Refresh()
 end
 
 --------------------------------------------------------------------------------
@@ -554,8 +616,8 @@ function UI:UpdateButtons()
         self.sortButton:SetHidden(self.mode ~= "ranking")
     end
     if self.volumeButton then
-        self.volumeButton:SetText(self.includeThin
-            and "Volume: all" or ("Volume: " .. RC.minVolume .. "+"))
+        self.volumeButton:SetText(RC.minVolume <= 0
+            and "Listings: any" or ("Listings: " .. RC.minVolume .. "+"))
         self.volumeButton:SetHidden(self.mode ~= "ranking")
     end
     if self.refreshButton then
