@@ -360,18 +360,38 @@ local function ItemName(itemLink)
     return zo_strformat(SI_TOOLTIP_ITEM_NAME, name)
 end
 
--- Item quality colour, so a Dreugh Wax row reads gold and a Honing Stone green.
--- ZO_ColorDef:New(GetItemQualityColor(q)) is ATT's proven call shape.
+-- The colour an item link shows in chat is the item's quality colour, and the
+-- surest way to get it exactly right is to let the game render the link rather
+-- than to recompute it. Labels parse link markup, so putting the link in as the
+-- text gives the real thing.
+--
+-- LINK_STYLE_DEFAULT (|H0:) renders the coloured name with no brackets;
+-- LINK_STYLE_BRACKETS (|H1:) is the bracketed chat form.
+function RC.DisplayLink(itemLink)
+    if not itemLink then return "" end
+    return (itemLink:gsub("^|H%d", "|H0"))
+end
+
+-- Belt and braces alongside the link text above: the cell's own colour.
+-- GetItemQualityColor returns a ZO_ColorDef in some client versions and plain
+-- r,g,b,a in others -- handling only one of those was why every row previously
+-- fell back to flat grey.
 function RC.QualityColor(itemLink)
     local getQuality = GetItemLinkDisplayQuality or GetItemLinkQuality
-    if not (getQuality and GetItemQualityColor and ZO_ColorDef) then return nil end
+    if not (getQuality and GetItemQualityColor) then return nil end
+
     local quality = getQuality(itemLink)
     if not quality then return nil end
-    local color = ZO_ColorDef:New(GetItemQualityColor(quality))
-    if not (color and color.UnpackRGBA) then return nil end
-    local r, g, b, a = color:UnpackRGBA()
-    if not r then return nil end
-    return { r, g, b, a or 1 }
+
+    local a1, a2, a3, a4 = GetItemQualityColor(quality)
+    if type(a1) == "table" then
+        if not a1.UnpackRGBA then return nil end
+        local r, g, b, a = a1:UnpackRGBA()
+        if not r then return nil end
+        return { r, g, b, a or 1 }
+    end
+    if type(a1) ~= "number" then return nil end
+    return { a1, a2 or 1, a3 or 1, a4 or 1 }
 end
 
 -- Names come from the game, so they are correct and localised without a table
@@ -508,18 +528,24 @@ function RC.NetPer(r, batch, band)
     return r.net[band or "mid"] / r.quantity * batch
 end
 
--- Two different questions, so both are reported and either can sort:
+-- The ranking answers a buyer's question: spotting an ore at some price, is it
+-- worth buying to refine? That is not the same comparison the detail view makes.
 --
---   net    -- refining beats selling the raw. The right measure when you
---             already hold the material and are deciding what to do with it.
---   refine -- what the refined output is worth, full stop. The right measure
---             when you are farming nodes, because then the raw cost is sunk and
---             "would it have sold for more raw" does not enter into it.
+--   breakEven -- the most you can pay per raw and still come out level, i.e.
+--                what refining one raw yields after guild store fees. Buy under
+--                this and you profit. For a farmer the raw is free, so this is
+--                also simply what each gathered node is worth refined.
+--   margin    -- return on gold spent at the current market raw price. Ranks
+--                which ore is the best use of the same gold.
+--   net       -- refining versus selling the raw you already hold.
 --
--- A material can rank high on one and poorly on the other.
+-- Note the buyer figures cost the GROSS raw price: you pay the asking price,
+-- with no fee on the way in. Fees land only on the refined sale. That is why
+-- these do not simply fall out of the detail view's net.
 RC.RANK_SORTS = {
-    { key = "net",    label = "Sort: net gain" },
-    { key = "refine", label = "Sort: refined value" },
+    { key = "margin",    label = "Sort: margin" },
+    { key = "breakEven", label = "Sort: break-even" },
+    { key = "net",       label = "Sort: net gain" },
 }
 
 -- Evaluates every material. Returns a list of entries, unsorted.
@@ -529,13 +555,17 @@ function RC.RankAll(batch)
     for _, mat in ipairs(MATERIALS) do
         local r = RC.Evaluate(mat, batch)
         if r then
+            local buyCost   = r.sellRawGross.mid          -- gross: what you pay
+            local revenue   = r.refineNet.mid             -- net of fees on the sale
+            local breakEven = batch > 0 and revenue / batch or 0
             list[#list + 1] = {
-                mat    = mat,
-                result = r,
-                net    = r.net.mid,
-                refine = r.refineNet.mid,
-                netLow = r.net.low,
-                netHigh = r.net.high,
+                mat       = mat,
+                result    = r,
+                rawPrice  = r.pRaw.mid,
+                breakEven = breakEven,
+                buyProfit = revenue - buyCost,
+                margin    = buyCost > 0 and (revenue - buyCost) / buyCost or 0,
+                net       = r.net.mid,
             }
         end
     end
@@ -543,7 +573,8 @@ function RC.RankAll(batch)
 end
 
 function RC.SortRanking(list, sortKey)
-    local key = (sortKey == "refine") and "refine" or "net"
+    local key = sortKey
+    if key ~= "breakEven" and key ~= "net" then key = "margin" end
     table.sort(list, function(a, b)
         if a[key] ~= b[key] then return a[key] > b[key] end
         return RC.MaterialLabel(a.mat) < RC.MaterialLabel(b.mat)

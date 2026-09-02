@@ -234,7 +234,13 @@ function UI:Create()
         UI:Refresh()
     end)
     self.sortButton = self:MakeButton(self.header, 138, 150, 28, function()
-        UI.sortKey = (UI.sortKey == "refine") and "net" or "refine"
+        -- Cycle through RC.RANK_SORTS rather than hardcoding the order here.
+        local sorts = RC.RANK_SORTS
+        local at = 1
+        for index, s in ipairs(sorts) do
+            if s.key == UI.sortKey then at = index break end
+        end
+        UI.sortKey = sorts[(at % #sorts) + 1].key
         UI:Refresh()
     end)
     self.refreshButton = self:MakeButton(self.header, 296, 140, 28, function()
@@ -285,10 +291,15 @@ function UI:SetRow(index, values, color, itemLink)
     row.cells.name.itemLink = itemLink
     row.cells.name.onClick = nil
 
-    -- Item names take their in-game quality colour, so Dreugh Wax reads gold and
-    -- Honing Stone green. Only when the row has no explicit colour override, so
-    -- a "no data" warning still shows as a warning.
+    -- Item rows show the link itself rather than a plain name, so the game
+    -- renders it in exactly the colour it would have in chat. LINK_STYLE_DEFAULT
+    -- drops the brackets, which would otherwise eat column width.
+    --
+    -- The quality colour is also applied to the cell, which matters if the label
+    -- ever renders the link as plain text: the name still comes out the right
+    -- colour instead of flat grey.
     if itemLink and not color then
+        row.cells.name:SetText(RC.DisplayLink(itemLink))
         local quality = RC.QualityColor(itemLink)
         if quality then row.cells.name:SetColor(unpack(quality)) end
     end
@@ -437,34 +448,35 @@ function UI:RenderRanking()
     local batch = 200
     local list = RC.SortRanking(RC.RankAll(batch), self.sortKey)
 
-    self.title:SetText(string.format("Most profitable to refine -- per %d raw", batch))
+    self.title:SetText("Worth buying to refine?")
     local mdText, mdState = RC.DescribeMD(RC.GetMD())
     self.subtitle:SetText(mdText)
     self.subtitle:SetColor(unpack(mdState == "active" and COLOR_GOOD or COLOR_WARN))
 
     local h = self.headerRow.cells
-    h.name:SetText("Item")
+    h.name:SetText("Raw material")
     h.src:SetText("Craft")
-    h.price:SetText("Tier")
-    h.qty:SetText("Refined")
-    h.value:SetText("Net")
+    h.price:SetText("Market")
+    h.qty:SetText("Pay up to")
+    h.value:SetText("Margin")
 
     local i = 0
     for index, entry in ipairs(list) do
         if index > RANK_LIMIT then break end
         i = i + 1
-        local link = RC.RefinedLink(entry.mat)
+        -- The RAW item here, not the refined one: this is the thing you buy.
+        local link = RC.RawLink(entry.mat)
         local row = self:SetRow(i, {
-            name  = RC.MaterialLabel(entry.mat),
             src   = entry.mat.craft.short,
-            price = tostring(entry.mat.tier),
-            qty   = RC.FormatGold(entry.refine),
-            value = (entry.net >= 0 and "+" or "-") .. RC.FormatGold(math.abs(entry.net)),
+            price = RC.FormatGold(entry.rawPrice),
+            qty   = RC.FormatGold(entry.breakEven),
+            value = string.format("%+.0f%%", entry.margin * 100),
         }, nil, link)
 
-        -- Net is the column that decides refine-vs-sell, so colour that cell
-        -- rather than the whole row, which keeps the quality colour on the name.
-        row.cells.value:SetColor(unpack(entry.net >= 0 and COLOR_GOOD or COLOR_BAD))
+        -- Colour the margin cell only, so the name keeps its item colour.
+        row.cells.value:SetColor(unpack(entry.margin >= 0 and COLOR_GOOD or COLOR_BAD))
+        -- Break-even above market means it is worth buying right now.
+        row.cells.qty:SetColor(unpack(entry.breakEven >= entry.rawPrice and COLOR_GOOD or COLOR_DIM))
 
         local mat = entry.mat
         row.cells.name.onClick = function()
@@ -485,9 +497,7 @@ function UI:RenderRanking()
     self.verdict:SetColor(unpack(COLOR_TEXT))
     self.verdict:SetAnchor(TOPLEFT, self.tableArea, BOTTOMLEFT, 0, 8)
 
-    self.perBatch:SetText(self.sortKey == "refine"
-        and "Refined = value of the refined output. Use when farming: the raw is free."
-        or  "Net = refining beats selling raw. Use when you already hold the material.")
+    self.perBatch:SetText("Pay up to = most you can pay per raw and still break even. Green beats market.")
     self.perBatch:SetColor(unpack(COLOR_DIM))
     self.perBatch:SetAnchor(TOPLEFT, self.verdict, BOTTOMLEFT, 0, 2)
 
@@ -517,7 +527,11 @@ function UI:UpdateButtons()
         self.modeButton:SetText(self.mode == "ranking" and "Detail" or "Find best")
     end
     if self.sortButton then
-        self.sortButton:SetText(self.sortKey == "refine" and "Sort: refined" or "Sort: net")
+        local label = "Sort"
+        for _, s in ipairs(RC.RANK_SORTS) do
+            if s.key == self.sortKey then label = s.label break end
+        end
+        self.sortButton:SetText(label)
         self.sortButton:SetHidden(self.mode ~= "ranking")
     end
     if self.refreshButton then
