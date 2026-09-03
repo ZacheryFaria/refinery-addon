@@ -709,20 +709,26 @@ function UI:RenderStatsCraft(s, i, entry)
 
     local t = entry.total
     local yield = t.raw > 0 and (t.refined / t.raw) or 0
+    -- Both returns: this is the row that checks refinedPerRaw, so it should
+    -- carry the same green/amber signal as the temper rows.
+    local yieldValues, yieldColor = Compare("refined material", t.refined,
+        t.raw * RC.refinedPerRaw, yield, RC.refinedPerRaw, t.refines, false)
     i = i + 1
-    self:SetRow(i, (Compare("refined material", t.refined, t.raw * RC.refinedPerRaw,
-        yield, RC.refinedPerRaw, t.refines, false)))
+    self:SetRow(i, yieldValues, yieldColor)
 
     i = i + 1
     self:SetRow(i, { name = string.format("-- tempers over %s refines --",
         RC.FormatGold(t.refines)) }, COLOR_DIM)
 
+    -- Named with the real item and carrying its link, so these rows hover into
+    -- the TTC/ATT tooltip like every other item row in the window.
     for _, tier in ipairs(s.tiers) do
+        local link = RC.TemperLink(entry.craft, tier)
         local observed = t.refines > 0 and (t[tier] / t.refines) or 0
-        local values, color = Compare(tier, t[tier], t.refines * s.expected[tier],
+        local values, color = Compare(RC.ItemName(link), t[tier], t.refines * s.expected[tier],
             observed, s.expected[tier], t.refines, true)
         i = i + 1
-        self:SetRow(i, values, color)
+        self:SetRow(i, values, color, link)
     end
 
     i = i + 1
