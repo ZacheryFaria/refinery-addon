@@ -625,21 +625,32 @@ local function Signed(v)
     return (v >= 0 and "+" or "-") .. RC.FormatGold(v >= 0 and v or -v)
 end
 
--- Observed versus expected for one measure. Green when within 5%, which at
--- small sample sizes means little -- the view says so separately.
-local function Compare(label, observed, expected, samples, isRate)
+-- Observed versus expected for one measure, in both absolute counts and rates.
+-- The counts are what you can actually check against your own bags; the rate is
+-- what compares across different-sized runs.
+--
+-- gotCount / expectedCount are real quantities; observed / expected are the
+-- corresponding rates. Green when within 5%, which at small sample sizes means
+-- little -- the view says so separately.
+local function Compare(label, gotCount, expectedCount, observed, expected, samples, isRate)
     local diff = expected ~= 0 and ((observed - expected) / expected) or 0
     local color = COLOR_DIM
     if samples > 0 then
         color = (math.abs(diff) <= 0.05) and COLOR_GOOD or COLOR_WARN
     end
-    local function Fmt(v) return isRate and Pct(v) or string.format("%.3f", v) end
+    local function Rate(v) return isRate and Pct(v) or string.format("%.3f", v) end
+    -- Expected counts are fractional; rounding 2.475 to "2" would make a small
+    -- sample look further off than it is, so keep a decimal while numbers are low.
+    local function Count(v)
+        if v > 0 and v < 100 then return string.format("%.1f", v) end
+        return RC.FormatGold(v)
+    end
     return {
         name  = label,
-        price = samples > 0 and Fmt(observed) or "--",
-        qty   = Fmt(expected),
-        value = samples > 0 and string.format("%+.1f%%", diff * 100) or "--",
-        vol   = RC.FormatGold(samples),
+        price = samples > 0 and RC.FormatGold(gotCount) or "--",
+        qty   = Count(expectedCount),
+        value = samples > 0 and Rate(observed) or "--",
+        vol   = samples > 0 and string.format("%+.1f%%", diff * 100) or "--",
     }, color
 end
 
@@ -691,22 +702,25 @@ function UI:RenderStatsCraft(s, i, entry)
     local h = self.headerRow.cells
     h.name:SetText(entry.craft.label)
     h.src:SetText("")
-    h.price:SetText("Observed")
+    h.price:SetText("Got")
     h.qty:SetText("Expected")
-    h.value:SetText("Diff")
-    h.vol:SetText("Refines")
+    h.value:SetText("Rate")
+    h.vol:SetText("Diff")
 
     local t = entry.total
     local yield = t.raw > 0 and (t.refined / t.raw) or 0
     i = i + 1
-    self:SetRow(i, (Compare("refined per raw", yield, RC.refinedPerRaw, t.refines, false)))
+    self:SetRow(i, (Compare("refined material", t.refined, t.raw * RC.refinedPerRaw,
+        yield, RC.refinedPerRaw, t.refines, false)))
 
     i = i + 1
-    self:SetRow(i, { name = "-- temper drops per refine --" }, COLOR_DIM)
+    self:SetRow(i, { name = string.format("-- tempers over %s refines --",
+        RC.FormatGold(t.refines)) }, COLOR_DIM)
 
     for _, tier in ipairs(s.tiers) do
         local observed = t.refines > 0 and (t[tier] / t.refines) or 0
-        local values, color = Compare(tier, observed, s.expected[tier], t.refines, true)
+        local values, color = Compare(tier, t[tier], t.refines * s.expected[tier],
+            observed, s.expected[tier], t.refines, true)
         i = i + 1
         self:SetRow(i, values, color)
     end
